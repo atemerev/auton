@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from .models import (
     AgentNode,
     AgentPolicy,
     AgentSpec,
     AgentState,
+    HealthSnapshot,
     InvalidTransition,
     SpawnRequest,
     SuspendReason,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AgentRegistry:
@@ -21,6 +25,9 @@ class AgentRegistry:
 
     def __init__(self) -> None:
         self._roots: dict[str, AgentNode] = {}
+        self._executors: dict[str, Any] = {}  # path -> AgentExecutor
+        self.publish_event: Callable | None = None
+        self.db = None
 
     # ------------------------------------------------------------------
     # Path resolution
@@ -89,9 +96,14 @@ class AgentRegistry:
             node = AgentNode(id=agent_id, spec=req.spec, policy=req.policy)
             self._roots[agent_id] = node
 
-        # Immediately transition to running (MVP — no async boot)
+        # Immediately transition to running
         node.transition(AgentState.RUNNING)
         node._log_event("spawned", {"goal": req.spec.goal, "model": req.spec.model})
+
+        # Start executor if publish_event is wired
+        if self.publish_event:
+            self._start_executor(node)
+
         return node
 
     def terminate(self, path: str, cascade: bool = True) -> AgentNode:
@@ -103,6 +115,9 @@ class AgentRegistry:
         if cascade:
             for child in list(node.children.values()):
                 self._terminate_recursive(child)
+
+        # Stop executor before state transition
+        self._stop_executor(path)
 
         node.transition(AgentState.TERMINATING)
         node.transition(AgentState.DEAD)
@@ -136,6 +151,10 @@ class AgentRegistry:
         node = self.resolve(path)
         if node is None:
             raise AgentNotFound(path)
+
+        # Stop executor before suspending
+        self._stop_executor(path)
+
         node.transition(AgentState.SUSPENDED)
         node.suspend_reason = reason
         node._log_event("suspended", {"reason": reason.value})
@@ -151,6 +170,11 @@ class AgentRegistry:
         node.transition(AgentState.RUNNING)
         node.suspend_reason = None
         node._log_event("resumed")
+
+        # Restart executor
+        if self.publish_event:
+            self._start_executor(node)
+
         return node
 
     def correct(self, path: str, guidance: str) -> AgentNode:
@@ -238,6 +262,68 @@ class AgentRegistry:
         node.health.drift = 0.0
         node.transition(AgentState.RUNNING)
         node._log_event("restarted", {"restart_count": node.restart_count})
+
+        # Start executor
+        if self.publish_event:
+            self._start_executor(node)
+
+        return node
+
+    # ------------------------------------------------------------------
+    # Executor management
+    # ------------------------------------------------------------------
+
+    def _start_executor(self, node: AgentNode) -> None:
+        """Create and start an executor for an agent."""
+        from auton.executor import AgentExecutor
+
+        executor = AgentExecutor(node, self.publish_event, self.db)
+        self._executors[node.path] = executor
+        executor.start()
+        logger.info(f"Started executor for {node.path}")
+
+    def _stop_executor(self, path: str) -> None:
+        """Stop the executor for an agent if running."""
+        executor = self._executors.pop(path, None)
+        if executor:
+            executor.stop()
+            logger.info(f"Stopped executor for {path}")
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def restore(self, data: dict) -> AgentNode:
+        """Restore an agent from persisted data (called on startup)."""
+        from datetime import datetime
+
+        spec = AgentSpec(**data["spec"])
+        policy = AgentPolicy(**data["policy"])
+        node = AgentNode(
+            id=data["id"],
+            spec=spec,
+            policy=policy,
+            parent_path=data.get("parent_path"),
+        )
+        # Restore state without transition validation
+        node.state = AgentState(data["state"])
+        node.health = HealthSnapshot(**data.get("health", {}))
+        node.restart_count = data.get("restart_count", 0)
+        if data.get("created_at"):
+            node.created_at = datetime.fromisoformat(data["created_at"])
+
+        # Place in tree
+        if node.parent_path:
+            parent = self.resolve(node.parent_path)
+            if parent:
+                parent.children[node.id] = node
+            else:
+                # Parent not loaded yet — store as root for now
+                self._roots[node.id] = node
+        else:
+            self._roots[node.id] = node
+
+        logger.info(f"Restored agent {node.path} (state: {node.state.value})")
         return node
 
 

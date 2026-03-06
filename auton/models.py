@@ -46,6 +46,7 @@ class SuspendReason(str, Enum):
     DRIFT_DETECTED = "drift_detected"
     LOOP_DETECTED = "loop_detected"
     DEPTH_EXCEEDED = "depth_exceeded"
+    EXECUTION_ERROR = "execution_error"
     MANUAL = "manual"
 
 
@@ -84,7 +85,7 @@ class AgentPolicy(BaseModel):
 
 class AgentSpec(BaseModel):
     goal: str
-    model: str = "claude-sonnet-4-6"
+    model: str = "openrouter/anthropic/claude-sonnet-4-6"
     tools: list[str] = Field(default_factory=list)
     schedule: str | None = None  # cron expression for periodic agents
 
@@ -149,6 +150,7 @@ class AgentNode:
         self.checkpoints: list[dict[str, Any]] = []
         self.log: list[dict[str, Any]] = []
         self.messages: list[dict[str, Any]] = []
+        self.error_message: str | None = None
 
     @property
     def path(self) -> str:
@@ -222,6 +224,8 @@ class AgentNode:
         }
         if self.suspend_reason:
             result["suspend_reason"] = self.suspend_reason.value
+        if self.error_message:
+            result["error_message"] = self.error_message
         if include_children and depth < max_depth:
             result["children"] = [
                 child.to_dict(include_children=True, depth=depth + 1, max_depth=max_depth)

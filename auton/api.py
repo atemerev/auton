@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from .models import (
@@ -22,10 +25,111 @@ from .models import (
 from .oversight import OversightEngine
 from .registry import AgentExists, AgentNotFound, AgentRegistry, PolicyViolation
 
+logger = logging.getLogger(__name__)
+
+
+def _load_env_file(path):
+    """Load env vars from a file. Only sets vars not already in environment."""
+    import os
+    from pathlib import Path
+
+    env_path = Path(path)
+    if not env_path.exists():
+        return False
+
+    logger.info(f"Loading env from {env_path}")
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if value and not os.environ.get(key):
+            os.environ[key] = value
+            if "KEY" in key or "TOKEN" in key:
+                logger.info(f"  {key} = {value[:8]}...")
+            else:
+                logger.info(f"  {key} = {value}")
+    return True
+
+
+def _load_all_env():
+    """Load env vars from local .env, then fall back to Lethe config."""
+    from pathlib import Path
+
+    # Local .env first (project-specific keys)
+    _load_env_file(Path.cwd() / ".env")
+
+    # Then Lethe config (shared keys)
+    lethe_env = Path.home() / ".config" / "lethe" / ".env"
+    if not lethe_env.exists():
+        lethe_env = Path.home() / ".lethe" / ".env"
+    _load_env_file(lethe_env)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize database, load agents, register tools, start scheduler."""
+    from .db import Database
+    from .scheduler import Scheduler
+    from .tools import register_tool
+    from .tools.web import fetch_webpage, web_search
+
+    # Load API keys from .env files
+    _load_all_env()
+
+    # Register global tools
+    register_tool(web_search)
+    register_tool(fetch_webpage)
+    logger.info("Tools registered: web_search, fetch_webpage")
+
+    # Initialize database
+    db = Database()
+    await db.init()
+
+    # Wire registry
+    registry.publish_event = _publish_event
+    registry.db = db
+
+    # Load persisted agents
+    agents = await db.load_agents()
+    for agent_data in agents:
+        node = registry.restore(agent_data)
+        # Resume scheduled agents that were idle
+        if node.state == AgentState.IDLE and node.spec.schedule:
+            logger.info(f"Restored scheduled agent: {node.path}")
+
+    logger.info(f"Loaded {len(agents)} agents from database")
+
+    # Start scheduler
+    scheduler = Scheduler(registry, _publish_event, db)
+    scheduler.start()
+
+    yield
+
+    # Cleanup
+    scheduler.stop()
+    # Save all running agents
+    for root in registry._roots.values():
+        await _save_tree(root, db)
+    await db.close()
+    logger.info("Auton shutdown complete")
+
+
+async def _save_tree(node, db):
+    """Recursively save all agents in a tree."""
+    await db.save_agent(node)
+    for child in node.children.values():
+        await _save_tree(child, db)
+
+
 app = FastAPI(
     title="Auton",
     description="Agent runtime for long-running autonomous agents with built-in oversight",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 registry = AgentRegistry()
@@ -363,3 +467,55 @@ async def _observe_redirect(path: str):
 async def _log_redirect(path: str):
     """Handle /agents/foo/log routed through the catch-all GET."""
     return await stream_log(path, None)
+
+
+# ---------------------------------------------------------------------------
+# Person Research (Demo)
+# ---------------------------------------------------------------------------
+
+
+class ResearchRequest(BaseModel):
+    name: str
+    details: str = ""
+    schedule: str | None = None
+    model: str = "openrouter/anthropic/claude-sonnet-4-6"
+
+
+@app.post("/research")
+async def start_person_research(req: ResearchRequest):
+    """Spawn a person research agent."""
+    from .agents.person_research import create_person_research_spec
+
+    spec = create_person_research_spec(
+        person_name=req.name,
+        known_details=req.details,
+        schedule=req.schedule,
+        model=req.model,
+    )
+    try:
+        node = registry.spawn(spec)
+    except AgentExists as e:
+        raise _error(409, str(e))
+    except PolicyViolation as e:
+        raise _error(422, str(e))
+    _publish_event(node.path, {"type": "spawned", "path": node.path})
+    return _json_response(node.to_dict(), 201)
+
+
+@app.get("/research/{agent_id}/dossier")
+async def get_dossier(agent_id: str):
+    """Get the research dossier for an agent."""
+    from .tools.dossier import get_dossier as get_mem_dossier
+
+    # Try in-memory first
+    dossier = get_mem_dossier(agent_id)
+    if dossier.get("last_updated"):
+        return dossier
+
+    # Try database
+    if registry.db:
+        db_dossier = await registry.db.load_dossier(agent_id)
+        if db_dossier:
+            return db_dossier
+
+    raise _error(404, f"No dossier found for agent {agent_id}")
