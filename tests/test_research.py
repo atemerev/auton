@@ -128,8 +128,8 @@ async def test_spawn_custom_agent_only_gets_requested_tools():
 
 
 @pytest.mark.asyncio
-async def test_research_agent_gets_file_and_finish_tools():
-    """Research agents (via /research) get file tools and finish in their spec."""
+async def test_agent_with_file_tools_gets_workspace_and_budget():
+    """Agents with file tools in their spec get workspace tools and auto budget tool."""
     mock_resp = _make_llm_response(content="Research complete.")
     registered_tools = []
 
@@ -146,14 +146,20 @@ async def test_research_agent_gets_file_and_finish_tools():
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
-                resp = await client.post("/research", json={
-                    "name": "Test Person",
-                    "details": "nobody",
+                resp = await client.post("/agents", json={
+                    "id": "test-file-tools",
+                    "spec": {
+                        "name": "File Tools Agent",
+                        "goal": "Do research",
+                        "system_prompt": "You are a researcher.",
+                        "tools": ["web_search", "write_file", "read_file", "finish"],
+                        "max_tokens": 100000,
+                    },
                 })
                 assert resp.status_code == 201
                 await asyncio.sleep(0.5)
 
-    # Should have file tools, finish, and budget tools
+    # Should have file tools, finish, and auto-registered budget tool
     assert "write_file" in registered_tools
     assert "read_file" in registered_tools
     assert "finish" in registered_tools

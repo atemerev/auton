@@ -612,37 +612,3 @@ async def delete_template(name: str):
         raise _error(404, f"Template not found: {name}")
     return {"status": "deleted", "name": name}
 
-
-# ---------------------------------------------------------------------------
-# Person Research (Demo)
-# ---------------------------------------------------------------------------
-
-
-class ResearchRequest(BaseModel):
-    name: str
-    details: str = ""
-    schedule: str | None = None
-    model: str = "openrouter/anthropic/claude-sonnet-4-6"
-
-
-@app.post("/research")
-async def start_person_research(req: ResearchRequest):
-    """Spawn a person research agent."""
-    from .agents.person_research import create_person_research_spec
-
-    spec = create_person_research_spec(
-        person_name=req.name,
-        known_details=req.details,
-        schedule=req.schedule,
-        model=req.model,
-    )
-    try:
-        node = registry.spawn(spec)
-    except AgentExists as e:
-        raise _error(409, str(e))
-    except PolicyViolation as e:
-        raise _error(422, str(e))
-    _publish_event(node.path, {"type": "spawned", "path": node.path})
-    return _json_response(node.to_dict(), 201)
-
-
