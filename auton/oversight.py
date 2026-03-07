@@ -46,43 +46,42 @@ class OversightEngine:
         node.health.last_check = now
 
         # Budget check: total tokens
-        budget = node.policy.budget
-        if budget.max_total_tokens and node.health.tokens_total >= budget.max_total_tokens:
+        if node.spec.max_tokens and node.health.tokens_total >= node.spec.max_tokens:
             events.append(OversightEvent(
                 path=node.path,
                 kind="budget_exceeded",
-                detail=f"Total tokens {node.health.tokens_total} >= {budget.max_total_tokens}",
+                detail=f"Total tokens {node.health.tokens_total} >= {node.spec.max_tokens}",
                 action="suspend",
             ))
             self._auto_suspend(node, SuspendReason.BUDGET_EXCEEDED)
 
         # Budget check: token rate
-        if budget.max_tokens_per_hour and node.health.token_rate > budget.max_tokens_per_hour:
+        if node.spec.max_tokens_per_hour and node.health.token_rate > node.spec.max_tokens_per_hour:
             events.append(OversightEvent(
                 path=node.path,
                 kind="token_rate_exceeded",
-                detail=f"Token rate {node.health.token_rate:.0f}/h > {budget.max_tokens_per_hour}/h",
+                detail=f"Token rate {node.health.token_rate:.0f}/h > {node.spec.max_tokens_per_hour}/h",
                 action="warn",
             ))
 
         # Budget check: runtime
-        if budget.max_runtime_seconds and node.started_at:
+        if node.spec.max_runtime_seconds and node.started_at:
             elapsed = (now - node.started_at).total_seconds()
-            if elapsed > budget.max_runtime_seconds:
+            if elapsed > node.spec.max_runtime_seconds:
                 events.append(OversightEvent(
                     path=node.path,
                     kind="runtime_exceeded",
-                    detail=f"Runtime {elapsed:.0f}s > {budget.max_runtime_seconds}s",
+                    detail=f"Runtime {elapsed:.0f}s > {node.spec.max_runtime_seconds}s",
                     action="suspend",
                 ))
                 self._auto_suspend(node, SuspendReason.BUDGET_EXCEEDED)
 
         # Drift check
-        if node.health.drift > node.policy.drift_threshold:
+        if node.health.drift > node.spec.drift_threshold:
             events.append(OversightEvent(
                 path=node.path,
                 kind="drift_detected",
-                detail=f"Drift {node.health.drift:.2f} > threshold {node.policy.drift_threshold}",
+                detail=f"Drift {node.health.drift:.2f} > threshold {node.spec.drift_threshold}",
                 action="suspend",
             ))
             self._auto_suspend(node, SuspendReason.DRIFT_DETECTED)

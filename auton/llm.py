@@ -15,6 +15,8 @@ from typing import Any, Callable
 
 from litellm import acompletion
 
+from auton.budget import BudgetPlanner
+
 logger = logging.getLogger(__name__)
 
 # Circuit breaker constants (from Lethe)
@@ -35,7 +37,10 @@ class LLMClient:
     """Async LLM client with tool-calling loop."""
 
     def __init__(self, model: str, system_prompt: str, temperature: float = 0.7, max_output_tokens: int = 4096,
-                 budget_check: Callable[[], bool] | None = None):
+                 budget_check: Callable[[], bool] | None = None,
+                 on_event: Callable[[dict], None] | None = None,
+                 budget_planner: BudgetPlanner | None = None,
+                 output_tools: set[str] | None = None):
         self.model = model
         self.system_prompt = system_prompt
         self.temperature = temperature
@@ -45,6 +50,15 @@ class LLMClient:
         self._stop_requested = False
         self.usage = TokenUsage()
         self._budget_check = budget_check  # Returns True if budget exceeded
+        self._on_event = on_event  # Granular event callback for streaming
+        self._budget_planner = budget_planner  # Cost estimation & finalize trigger
+
+        # Write gate: structural enforcement of incremental saves.
+        # Auto-enabled for agents with a budget and write_file tool.
+        # Cadence tightens as budget approaches limit.
+        self._output_tools = output_tools or set()
+        self._calls_since_save = 0
+        self._write_gate_active = False
 
     def add_tool(self, func: Callable, schema: dict) -> None:
         """Register a tool function with its OpenAI function schema."""
@@ -52,11 +66,35 @@ class LLMClient:
         self._tools[name] = (func, schema)
 
     def _build_tool_specs(self) -> list[dict]:
-        """Build OpenAI-format tool specs for the API call."""
+        """Build OpenAI-format tool specs for the API call.
+
+        When the write gate is active, only output tools (write_file,
+        read_file, list_files, finish, check_budget) are included.
+        """
         return [
             {"type": "function", "function": schema}
-            for _, schema in self._tools.values()
+            for name, (_, schema) in self._tools.items()
+            if not self._write_gate_active or name in self._output_tools
         ]
+
+    @property
+    def _save_cadence(self) -> int:
+        """Dynamic save cadence based on budget consumption.
+
+        Returns 0 (disabled) when there's no budget planner or no output tools.
+        Tightens as budget approaches the limit:
+          <50% used → every 5 data-gathering calls
+          50-80%    → every 3
+          >80%      → every 1 (save after each call)
+        """
+        if not self._output_tools or not self._budget_planner:
+            return 0
+        pct = self._budget_planner.pct_used
+        if pct >= 80:
+            return 1
+        elif pct >= 50:
+            return 3
+        return 5
 
     def get_tool(self, name: str) -> Callable | None:
         """Get a tool function by name."""
@@ -85,6 +123,97 @@ class LLMClient:
                 if self._stop_requested:
                     return self.messages[-1].get("content", "Done.") if self.messages else "Done."
 
+                # Budget planner: finalize before the next expensive API call
+                if self._budget_planner and self._budget_planner.should_finalize():
+                    logger.info(
+                        f"BudgetPlanner: finalize triggered. "
+                        f"Spent={self._budget_planner.total_spent:,}, "
+                        f"remaining={self._budget_planner.remaining:,}"
+                    )
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "[BUDGET LIMIT REACHED. You have used most of your token budget. "
+                            "Write any output files NOW, then produce your final summary. "
+                            "This is your last chance to save work.]"
+                        ),
+                    })
+                    # Activate write gate so the agent can save but not search
+                    self._write_gate_active = True
+                    finalize_resp = await self._call_api()
+                    fin_msg = finalize_resp["choices"][0]["message"]
+                    fin_content = fin_msg.get("content") or ""
+                    fin_tool_calls = fin_msg.get("tool_calls")
+                    fin_usage = finalize_resp.get("usage", {})
+                    if fin_usage:
+                        self.usage.prompt_tokens += fin_usage.get("prompt_tokens", 0)
+                        self.usage.completion_tokens += fin_usage.get("completion_tokens", 0)
+                        self.usage.total_tokens += fin_usage.get("total_tokens", 0)
+                        self._budget_planner.record_call(fin_usage.get("total_tokens", 0))
+
+                    # Execute any tool calls (write_file to save final state)
+                    if fin_tool_calls:
+                        self.messages.append({
+                            "role": "assistant",
+                            "content": fin_content,
+                            "tool_calls": fin_tool_calls,
+                        })
+                        for tc in fin_tool_calls:
+                            t_name = tc["function"]["name"].strip()
+                            t_id = tc.get("id") or f"call-{uuid.uuid4().hex[:12]}"
+                            try:
+                                t_args = json.loads(tc["function"]["arguments"])
+                            except json.JSONDecodeError:
+                                continue
+                            handler = self.get_tool(t_name)
+                            if handler:
+                                try:
+                                    if asyncio.iscoroutinefunction(handler):
+                                        t_result = await handler(**t_args)
+                                    else:
+                                        loop = asyncio.get_event_loop()
+                                        t_result = await loop.run_in_executor(
+                                            None, lambda: handler(**t_args)
+                                        )
+                                except Exception as e:
+                                    t_result = f"Error: {e}"
+                            else:
+                                t_result = f"Unknown tool: {t_name}"
+                            self.messages.append({
+                                "role": "tool",
+                                "content": str(t_result),
+                                "tool_call_id": t_id,
+                                "name": t_name,
+                            })
+                            if self._on_event:
+                                self._on_event({
+                                    "type": "tool_result",
+                                    "tool_name": t_name,
+                                    "tool_call_id": t_id,
+                                    "result_preview": str(t_result)[:500],
+                                    "is_error": False,
+                                })
+                        # Get final text response after saving
+                        final_resp = await self._call_api(no_tools=True)
+                        fin_content = final_resp["choices"][0]["message"].get("content", "")
+                        final_usage = final_resp.get("usage", {})
+                        if final_usage:
+                            self.usage.prompt_tokens += final_usage.get("prompt_tokens", 0)
+                            self.usage.completion_tokens += final_usage.get("completion_tokens", 0)
+                            self.usage.total_tokens += final_usage.get("total_tokens", 0)
+                            self._budget_planner.record_call(final_usage.get("total_tokens", 0))
+
+                    if fin_content:
+                        if self._on_event:
+                            self._on_event({
+                                "type": "llm_response",
+                                "content": fin_content,
+                                "tool_calls": [],
+                            })
+                        self.messages.append({"role": "assistant", "content": fin_content})
+                    self._stop_requested = True
+                    return fin_content or "Budget exhausted — finalizing."
+
                 response = await self._call_api()
 
                 choice = response["choices"][0]
@@ -99,6 +228,10 @@ class LLMClient:
                     self.usage.completion_tokens += usage.get("completion_tokens", 0)
                     self.usage.total_tokens += usage.get("total_tokens", 0)
 
+                # Record call cost in budget planner
+                if self._budget_planner:
+                    self._budget_planner.record_call(usage.get("total_tokens", 0))
+
                 # Inline budget check after every API call
                 if self._budget_check and self._budget_check():
                     logger.warning(f"Budget exceeded at {self.usage.total_tokens} tokens")
@@ -106,6 +239,17 @@ class LLMClient:
                     if content:
                         self.messages.append({"role": "assistant", "content": content})
                     return content or "Budget exceeded."
+
+                # Budget planner hard stop (115% absolute safety valve)
+                if self._budget_planner and self._budget_planner.hard_stop():
+                    logger.warning(
+                        f"BudgetPlanner hard stop at {self._budget_planner.total_spent:,} tokens "
+                        f"({self._budget_planner.pct_used:.0f}% of budget)"
+                    )
+                    self._stop_requested = True
+                    if content:
+                        self.messages.append({"role": "assistant", "content": content})
+                    return content or "Budget hard limit exceeded."
 
                 if tool_calls:
                     empty_count = 0
@@ -115,6 +259,17 @@ class LLMClient:
                     for tc in tool_calls:
                         if not tc.get("id"):
                             tc["id"] = f"call-{uuid.uuid4().hex[:12]}"
+
+                    # Emit llm_response event
+                    if self._on_event:
+                        self._on_event({
+                            "type": "llm_response",
+                            "content": content,
+                            "tool_calls": [
+                                {"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]}
+                                for tc in tool_calls
+                            ],
+                        })
 
                     # Add assistant message with tool calls
                     self.messages.append({
@@ -151,6 +306,15 @@ class LLMClient:
 
                         logger.info(f"Tool: {tool_name}({list(tool_args.keys())})")
 
+                        # Emit tool_call event
+                        if self._on_event:
+                            self._on_event({
+                                "type": "tool_call",
+                                "tool_name": tool_name,
+                                "tool_call_id": tool_id,
+                                "arguments": tool_args,
+                            })
+
                         # Execute (handle sync and async)
                         handler = self.get_tool(tool_name)
                         if handler:
@@ -174,12 +338,32 @@ class LLMClient:
                         else:
                             no_progress_turns = 0
 
+                        # Emit tool_result event
+                        if self._on_event:
+                            self._on_event({
+                                "type": "tool_result",
+                                "tool_name": tool_name,
+                                "tool_call_id": tool_id,
+                                "result_preview": str(result)[:500],
+                                "is_error": is_error,
+                            })
+
                         self.messages.append({
                             "role": "tool",
                             "content": str(result),
                             "tool_call_id": tool_id,
                             "name": tool_name,
                         })
+
+                        # Write gate tracking
+                        if self._save_cadence > 0 and not is_error:
+                            if tool_name in ("write_file", "finish"):
+                                self._calls_since_save = 0
+                                if self._write_gate_active:
+                                    logger.info("Write gate: save detected, restoring all tools")
+                                    self._write_gate_active = False
+                            elif tool_name not in self._output_tools:
+                                self._calls_since_save += 1
 
                         if total_tool_errors >= MAX_TOOL_ERRORS:
                             circuit_breaker_reason = f"too many tool errors ({total_tool_errors})"
@@ -211,10 +395,35 @@ class LLMClient:
                         })
                         break
 
+                    # Write gate activation: after N data-gathering calls without
+                    # a save, physically remove non-output tools from the next call
+                    if (self._save_cadence > 0
+                            and not self._write_gate_active
+                            and self._calls_since_save >= self._save_cadence):
+                        self._write_gate_active = True
+                        logger.info(
+                            f"Write gate: activated after {self._calls_since_save} "
+                            f"calls without save"
+                        )
+                        self.messages.append({
+                            "role": "user",
+                            "content": (
+                                "[SAVE REQUIRED: You have gathered data from multiple "
+                                "sources without saving. Write your findings to disk "
+                                "now before continuing.]"
+                            ),
+                        })
+
                     continue  # Loop for next LLM response
 
                 # No tool calls — final response
                 if content:
+                    if self._on_event:
+                        self._on_event({
+                            "type": "llm_response",
+                            "content": content,
+                            "tool_calls": [],
+                        })
                     self.messages.append({"role": "assistant", "content": content})
                     return content
 

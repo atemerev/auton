@@ -80,7 +80,7 @@ class Scheduler:
 
         try:
             node.transition(AgentState.RUNNING)
-            executor = AgentExecutor(node, self.publish_event, self.db)
+            executor = AgentExecutor(node, self.publish_event, self.db, registry=self.registry)
             self.registry._executors[node.path] = executor
             executor.start()
             node._log_event("scheduled_run", {"schedule": node.spec.schedule})

@@ -1,8 +1,12 @@
-"""Core data models: agent state machine, specs, policies, health."""
+"""Core data models: agent state machine, unified spec, health.
+
+The AgentSpec is the single source of truth for an agent's behavior,
+lifecycle, budget, and supervision — inspired by OTP's child_spec.
+The spec alone is enough to start, restart, supervise, and monitor an agent.
+"""
 
 from __future__ import annotations
 
-import time
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
@@ -63,31 +67,59 @@ class SupervisionStrategy(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# Schemas
+# Unified Agent Spec (OTP child_spec equivalent)
 # ---------------------------------------------------------------------------
 
 
-class BudgetSpec(BaseModel):
-    max_tokens_per_hour: int | None = None
-    max_total_tokens: int | None = None
-    max_runtime_seconds: int | None = None
+class AgentSpec(BaseModel):
+    """Complete, declarative agent specification.
 
+    This is the single source of truth for an agent. It fully describes
+    the agent's behavior, lifecycle, budget, and supervision policy.
+    No implicit behavior — everything is explicit in the spec.
+    """
 
-class AgentPolicy(BaseModel):
+    # ── Identity ──
+    name: str                          # human-readable name
+    description: str = ""              # what this agent does
+
+    # ── Behavior (all required for execution) ──
+    system_prompt: str                 # REQUIRED — defines the agent's persona and instructions
+    goal: str                          # the specific objective for this run
+    model: str = "openrouter/anthropic/claude-sonnet-4-6"
+    tools: list[str] = Field(default_factory=list)  # tool names from global registry
+    temperature: float = 0.7
+    max_turns: int = 30                # max LLM chat turns per execution
+
+    # ── Lifecycle ──
     restart: RestartPolicy = RestartPolicy.ON_FAILURE
-    supervision: SupervisionStrategy = SupervisionStrategy.ONE_FOR_ONE
     max_restarts: int = 3
-    budget: BudgetSpec = Field(default_factory=BudgetSpec)
+    supervision: SupervisionStrategy = SupervisionStrategy.ONE_FOR_ONE
+    shutdown_timeout: int = 30         # seconds to wait before force-kill
+
+    # ── Budget ──
+    max_tokens: int | None = None      # total token budget (None = unlimited)
+    max_runtime_seconds: int | None = None
+    max_tokens_per_hour: int | None = None
+
+    # ── Monitoring ──
     drift_threshold: float = 0.4
+
+    # ── Scheduling ──
+    schedule: str | None = None        # cron expression for periodic agents
+
+    # ── Children / Subagent policies ──
     max_children: int = 10
     max_depth: int = 3
 
+    # ── Extensibility ──
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
 
-class AgentSpec(BaseModel):
-    goal: str
-    model: str = "openrouter/anthropic/claude-sonnet-4-6"
-    tools: list[str] = Field(default_factory=list)
-    schedule: str | None = None  # cron expression for periodic agents
+
+# ---------------------------------------------------------------------------
+# API request/response models
+# ---------------------------------------------------------------------------
 
 
 class HealthSnapshot(BaseModel):
@@ -100,9 +132,11 @@ class HealthSnapshot(BaseModel):
 
 
 class SpawnRequest(BaseModel):
+    """Request to spawn a new agent. Provide either a full spec or a template name + overrides."""
     id: str | None = None
-    spec: AgentSpec
-    policy: AgentPolicy = Field(default_factory=AgentPolicy)
+    spec: AgentSpec | None = None           # full spec
+    template: str | None = None             # named template from registry
+    overrides: dict[str, Any] | None = None  # fields to override on template
 
 
 class CorrectionRequest(BaseModel):
@@ -133,12 +167,10 @@ class AgentNode:
         self,
         id: str,
         spec: AgentSpec,
-        policy: AgentPolicy,
         parent_path: str | None = None,
     ):
         self.id = id
         self.spec = spec
-        self.policy = policy
         self.parent_path = parent_path
         self.state = AgentState.SPAWNING
         self.suspend_reason: SuspendReason | None = None
@@ -149,7 +181,8 @@ class AgentNode:
         self.restart_count = 0
         self.checkpoints: list[dict[str, Any]] = []
         self.log: list[dict[str, Any]] = []
-        self.messages: list[dict[str, Any]] = []
+        self.messages: list[dict[str, Any]] = []  # control/correction messages
+        self.conversation: list[dict[str, Any]] = []  # LLM conversation history
         self.error_message: str | None = None
 
     @property
@@ -214,13 +247,13 @@ class AgentNode:
             "path": self.path,
             "state": self.state.value,
             "spec": self.spec.model_dump(),
-            "policy": self.policy.model_dump(),
             "health": self.health.model_dump(),
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "uptime": self.uptime,
             "restart_count": self.restart_count,
             "checkpoints": len(self.checkpoints),
+            "conversation_length": len(self.conversation),
         }
         if self.suspend_reason:
             result["suspend_reason"] = self.suspend_reason.value

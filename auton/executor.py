@@ -5,33 +5,147 @@ Modeled on Lethe's ActorRunner. The executor operates ON the AgentNode
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 
+from auton.budget import BudgetPlanner
 from auton.llm import LLMClient
 from auton.models import AgentNode, AgentState, SuspendReason
 from auton.tools import TOOL_REGISTRY, function_to_schema
-from auton.tools.dossier import (
-    get_dossier,
-    make_finish_research,
-    make_read_dossier,
-    make_update_dossier,
-    set_dossier,
+from auton.tools.workspace_tools import (
+    make_list_files,
+    make_pass_artifact,
+    make_read_file,
+    make_shell_exec,
+    make_write_file,
 )
+from auton.tools.coordination import (
+    make_check_child_status,
+    make_list_children,
+    make_message_child,
+    make_spawn_child,
+)
+from auton.workspace import ensure_workspace
 
 logger = logging.getLogger(__name__)
 
-MAX_TURNS = 30
 CHECKPOINT_INTERVAL = 5
+
+# Budget thresholds for escalating warnings
+BUDGET_WARN_PCT = 70      # Start mentioning budget
+BUDGET_URGENT_PCT = 85    # Urgent: demand deliverables
+BUDGET_FINAL_PCT = 95     # Final turn: produce output NOW
+BUDGET_HARD_STOP_PCT = 115  # LLM client hard-stop (safety valve — planner handles graceful stop)
+
+# All closure-bound tool names — these skip the global TOOL_REGISTRY lookup
+CLOSURE_TOOLS = {
+    # Workspace file tools
+    "write_file", "read_file", "list_files",
+    # Shell tool
+    "shell_exec",
+    # Artifact sharing
+    "pass_artifact",
+    # Agent coordination
+    "spawn_child", "message_agent", "list_children", "check_child_status",
+    # Control
+    "finish", "check_budget",
+}
+
+# Tools that require a workspace directory
+WORKSPACE_TOOLS = {"write_file", "read_file", "list_files", "shell_exec", "pass_artifact"}
+
+# Tools available during write gate (save + informational — everything else is gated)
+SAVE_GATE_TOOLS = {"write_file", "read_file", "list_files", "finish", "check_budget"}
+
+
+# ---------------------------------------------------------------------------
+# Generic tools (closure-bound to agent state)
+# ---------------------------------------------------------------------------
+
+
+def make_check_budget(node: AgentNode, planner: BudgetPlanner | None = None):
+    """Create a check_budget tool bound to this agent's node."""
+
+    def check_budget() -> str:
+        """Check remaining token budget and runtime. Call this to plan your work
+        and know when to start producing final deliverables."""
+        tokens_used = node.health.tokens_total
+        max_tokens = node.spec.max_tokens
+        elapsed = (datetime.now(timezone.utc) - node.created_at).total_seconds()
+        max_runtime = node.spec.max_runtime_seconds
+
+        result = {
+            "tokens_used": tokens_used,
+            "max_tokens": max_tokens,
+            "tokens_remaining": (max_tokens - tokens_used) if max_tokens else None,
+            "budget_pct": round(tokens_used / max_tokens * 100, 1) if max_tokens else None,
+            "elapsed_seconds": round(elapsed),
+            "max_runtime_seconds": max_runtime,
+        }
+
+        # Add planner estimates if available
+        if planner:
+            snap = planner.snapshot()
+            result["estimated_next_cost"] = snap["estimated_next_cost"]
+            result["estimated_calls_remaining"] = snap["estimated_calls_remaining"]
+            result["finalize_imminent"] = snap["finalize_triggered"]
+
+        # Add actionable advice
+        if max_tokens:
+            pct = tokens_used / max_tokens * 100
+            if pct >= BUDGET_FINAL_PCT:
+                result["advice"] = (
+                    "CRITICAL: Budget nearly exhausted. "
+                    "Produce final deliverables NOW — write output files and finalize results immediately."
+                )
+            elif pct >= BUDGET_URGENT_PCT:
+                result["advice"] = (
+                    "WARNING: Budget running low. "
+                    "Stop new research. Start producing deliverables and writing output files."
+                )
+            elif pct >= BUDGET_WARN_PCT:
+                result["advice"] = (
+                    "Budget past midpoint. Plan remaining work carefully. "
+                    "Prioritize deliverables over additional research."
+                )
+            else:
+                result["advice"] = "Budget is healthy. Continue working."
+
+        return json.dumps(result)
+
+    return check_budget
+
+
+def make_finish(stop_callback):
+    """Create a generic finish tool that signals task completion."""
+
+    def finish(summary: str) -> str:
+        """Signal that your task is complete.
+
+        Call this when you have completed your goal or gathered sufficient information.
+        Make sure you have written all output files before calling this.
+
+        Args:
+            summary: Brief summary of what was accomplished
+
+        Returns:
+            Confirmation
+        """
+        stop_callback()
+        return json.dumps({"status": "OK", "message": "Task complete."})
+
+    return finish
 
 
 class AgentExecutor:
     """Executes an agent's LLM loop as an asyncio.Task."""
 
-    def __init__(self, node: AgentNode, publish_event, db=None):
+    def __init__(self, node: AgentNode, publish_event, db=None, registry=None):
         self.node = node
         self.publish_event = publish_event
         self.db = db
+        self.registry = registry
         self._task: asyncio.Task | None = None
 
     def start(self) -> asyncio.Task:
@@ -78,26 +192,81 @@ class AgentExecutor:
                     self.node.transition(AgentState.IDLE)
             if self.db:
                 await self.db.save_agent(self.node)
-                dossier = get_dossier(self.node.id)
-                if dossier.get("last_updated"):
-                    await self.db.save_dossier(self.node.id, dossier)
+
+    def _get_budget_pct(self) -> float | None:
+        """Return current token budget usage as a percentage, or None if unlimited."""
+        node = self.node
+        if not node.spec.max_tokens:
+            return None
+        return (node.health.tokens_total / node.spec.max_tokens) * 100
+
+    def _build_continuation_message(self) -> str:
+        """Build a budget-aware continuation message with escalating urgency."""
+        budget_pct = self._get_budget_pct()
+
+        if budget_pct is None:
+            return "[Continue working toward your goal. Respond with your findings when done.]"
+
+        if budget_pct >= BUDGET_FINAL_PCT:
+            return (
+                f"[⚠️ FINAL TURN — {budget_pct:.0f}% of your token budget is used. "
+                "You MUST produce your final deliverables NOW. "
+                "Write any output files, finalize your report, and complete your goal immediately. "
+                "This is your LAST CHANCE to produce output before the budget runs out.]"
+            )
+        elif budget_pct >= BUDGET_URGENT_PCT:
+            return (
+                f"[URGENT: {budget_pct:.0f}% of your token budget is consumed. "
+                "You are running low on budget. Start producing final deliverables NOW. "
+                "Write output files and finalize your results. "
+                "Do not start new research — focus on completing your goal with what you have.]"
+            )
+        elif budget_pct >= BUDGET_WARN_PCT:
+            return (
+                f"[Budget notice: {budget_pct:.0f}% of your token budget is used. "
+                "Begin wrapping up your work. Prioritize producing deliverables "
+                "(writing files, finalizing reports) over additional research. "
+                "Continue working toward your goal.]"
+            )
+        else:
+            return "[Continue working toward your goal. Respond with your findings when done.]"
+
+    def _build_initial_message(self) -> str:
+        """Build the initial goal message with budget awareness."""
+        node = self.node
+        msg = node.spec.goal
+
+        if node.spec.max_tokens:
+            msg += (
+                f"\n\n[Budget: You have a budget of {node.spec.max_tokens:,} tokens for this task. "
+                "Use check_budget to monitor your usage. "
+                "When your budget runs low, prioritize producing deliverables "
+                "(writing output files, finalizing reports) over additional research. "
+                "Do NOT leave deliverables for the end — save incrementally.]"
+            )
+
+        return msg
 
     async def run(self) -> None:
-        """Main execution loop."""
+        """Main execution loop with budget-aware steering."""
         node = self.node
         logger.info(f"Starting execution for agent {node.id}: {node.spec.goal}")
 
-        # Load existing dossier from DB if available
-        if self.db:
-            existing = await self.db.load_dossier(node.id)
-            if existing:
-                set_dossier(node.id, existing)
-                logger.info(f"Loaded existing dossier for {node.id}")
+        # Ensure workspace if agent uses any workspace tools
+        requested_tools = set(node.spec.tools)
+        if requested_tools & WORKSPACE_TOOLS:
+            ensure_workspace(node.id)
 
-        # Build system prompt
-        system_prompt = self._build_system_prompt()
+        # System prompt comes directly from the spec — no implicit defaults
+        system_prompt = node.spec.system_prompt
 
-        # Budget check callback — called after every API call inside LLM client
+        # Create budget planner if agent has a token budget
+        planner = None
+        if node.spec.max_tokens:
+            planner = BudgetPlanner(max_budget=node.spec.max_tokens)
+
+        # Budget check callback — called after every API call inside LLM client.
+        # Safety valve at BUDGET_HARD_STOP_PCT (115%) — planner handles graceful stop.
         def _check_budget() -> bool:
             # Update health metrics on every API call
             node.health.tokens_total = llm.usage.total_tokens
@@ -106,58 +275,103 @@ class AgentExecutor:
                 node.health.token_rate = node.health.tokens_total / (elapsed / 3600)
             node.health.last_check = datetime.now(timezone.utc)
 
-            budget = node.policy.budget
-            if budget.max_total_tokens and llm.usage.total_tokens >= budget.max_total_tokens:
-                logger.warning(f"Agent {node.id} token budget exceeded: {llm.usage.total_tokens}")
-                return True
-            if budget.max_runtime_seconds and node.started_at:
+            # Hard stop at BUDGET_HARD_STOP_PCT (115%) — safety valve
+            if node.spec.max_tokens:
+                hard_limit = node.spec.max_tokens * BUDGET_HARD_STOP_PCT / 100
+                if llm.usage.total_tokens >= hard_limit:
+                    logger.warning(
+                        f"Agent {node.id} hard token limit exceeded: "
+                        f"{llm.usage.total_tokens} >= {hard_limit:.0f}"
+                    )
+                    return True
+            if node.spec.max_runtime_seconds and node.started_at:
                 runtime = (datetime.now(timezone.utc) - node.started_at).total_seconds()
-                if runtime > budget.max_runtime_seconds:
+                if runtime > node.spec.max_runtime_seconds:
                     logger.warning(f"Agent {node.id} runtime budget exceeded: {runtime:.0f}s")
                     return True
             return False
+
+        # Event callback — forward granular LLM events to SSE observers
+        def _on_llm_event(event: dict) -> None:
+            self.publish_event(node.path, event)
+
+        # Write gate: auto-enabled for agents with a budget and write_file tool.
+        # When active, only output_tools are available until the agent saves.
+        output_tools: set[str] = set()
+        if planner and "write_file" in requested_tools:
+            output_tools = requested_tools & SAVE_GATE_TOOLS
 
         # Create LLM client
         llm = LLMClient(
             model=node.spec.model,
             system_prompt=system_prompt,
             budget_check=_check_budget,
+            on_event=_on_llm_event,
+            budget_planner=planner,
+            output_tools=output_tools,
         )
 
+        # ------------------------------------------------------------------
         # Register tools from spec
+        # ------------------------------------------------------------------
+
+        # Global tools (from TOOL_REGISTRY)
         for tool_name in node.spec.tools:
+            if tool_name in CLOSURE_TOOLS:
+                continue  # handled below with closures
             if tool_name in TOOL_REGISTRY:
                 func, schema = TOOL_REGISTRY[tool_name]
                 llm.add_tool(func, schema)
 
-        # Register dossier tools (bound to this agent)
-        read_fn = make_read_dossier(node.id)
-        llm.add_tool(read_fn, function_to_schema(read_fn))
+        # Workspace file tools (closure-bound to agent_id)
+        if "write_file" in requested_tools:
+            fn = make_write_file(node.id)
+            llm.add_tool(fn, function_to_schema(fn))
+        if "read_file" in requested_tools:
+            fn = make_read_file(node.id)
+            llm.add_tool(fn, function_to_schema(fn))
+        if "list_files" in requested_tools:
+            fn = make_list_files(node.id)
+            llm.add_tool(fn, function_to_schema(fn))
 
-        update_fn = make_update_dossier(node.id)
-        llm.add_tool(update_fn, function_to_schema(update_fn))
+        # Shell tool (closure-bound to agent_id)
+        if "shell_exec" in requested_tools:
+            fn = make_shell_exec(node.id)
+            llm.add_tool(fn, function_to_schema(fn))
 
-        finish_fn = make_finish_research(node.id, lambda: setattr(llm, '_stop_requested', True))
-        llm.add_tool(finish_fn, function_to_schema(finish_fn))
+        # Artifact sharing (needs registry for cross-agent access)
+        if "pass_artifact" in requested_tools and self.registry:
+            fn = make_pass_artifact(node.id, self.registry)
+            llm.add_tool(fn, function_to_schema(fn))
+
+        # Agent coordination tools (need registry)
+        if "spawn_child" in requested_tools and self.registry:
+            fn = make_spawn_child(node.id, node.path, self.registry)
+            llm.add_tool(fn, function_to_schema(fn))
+        if "message_agent" in requested_tools and self.registry:
+            fn = make_message_child(node.id, self.registry)
+            llm.add_tool(fn, function_to_schema(fn))
+        if "list_children" in requested_tools and self.registry:
+            fn = make_list_children(node.id, node.path, self.registry)
+            llm.add_tool(fn, function_to_schema(fn))
+        if "check_child_status" in requested_tools and self.registry:
+            fn = make_check_child_status(node.id, self.registry)
+            llm.add_tool(fn, function_to_schema(fn))
+
+        # Generic finish tool — any agent can signal completion
+        if "finish" in requested_tools:
+            fn = make_finish(lambda: setattr(llm, '_stop_requested', True))
+            llm.add_tool(fn, function_to_schema(fn))
+
+        # Budget awareness tool — auto-registered when agent has a token budget
+        if node.spec.max_tokens or "check_budget" in requested_tools:
+            fn = make_check_budget(node, planner=planner)
+            llm.add_tool(fn, function_to_schema(fn))
 
         logger.info(f"Registered tools for {node.id}: {list(llm._tools.keys())}")
 
-        # Build initial message
-        has_existing = bool(get_dossier(node.id).get("last_updated"))
-        if has_existing:
-            initial_message = (
-                f"Continue researching: {node.spec.goal}\n\n"
-                "This is a recurring run. Read the existing dossier first with read_dossier(), "
-                "then search for NEW information, updates, or changes. "
-                "Focus on recent news, social media activity, and any changes since the last run."
-            )
-        else:
-            initial_message = (
-                f"Research this person: {node.spec.goal}\n\n"
-                "Begin by searching for them. Build a comprehensive dossier covering "
-                "basic info, social media profiles, career history, education, publications, "
-                "and recent news. Update the dossier as you find information."
-            )
+        # Build initial message — goal with budget context
+        initial_message = self._build_initial_message()
 
         # Publish start event
         self.publish_event(node.path, {
@@ -166,8 +380,8 @@ class AgentExecutor:
             "model": node.spec.model,
         })
 
-        # Run the LLM loop
-        for turn in range(MAX_TURNS):
+        # Run the LLM loop with budget-aware steering
+        for turn in range(node.spec.max_turns):
             if node.state in (AgentState.DEAD, AgentState.TERMINATING, AgentState.SUSPENDED):
                 logger.info(f"Agent {node.id} state changed to {node.state.value}, stopping")
                 break
@@ -176,12 +390,15 @@ class AgentExecutor:
             corrections = [m for m in node.messages if m.get("kind") == "correction"]
             if corrections:
                 msg = corrections[-1]
-                initial_message = f"[Correction from operator]: {msg['content']}\n\nAdjust your research accordingly."
+                initial_message = f"[Correction from operator]: {msg['content']}\n\nAdjust your work accordingly."
                 node.messages = [m for m in node.messages if m.get("kind") != "correction"]
 
-            message = initial_message if turn == 0 else "[Continue research. Update the dossier with any new findings. Call finish_research() when done.]"
+            message = initial_message if turn == 0 else self._build_continuation_message()
 
             response = await llm.chat(message)
+
+            # Sync conversation to node (bounded)
+            node.conversation = llm.messages[-200:]
 
             # Update health metrics
             node.health.tokens_total = llm.usage.total_tokens
@@ -190,26 +407,31 @@ class AgentExecutor:
                 node.health.token_rate = node.health.tokens_total / (elapsed / 3600)
             node.health.last_check = datetime.now(timezone.utc)
 
-            # Inline budget enforcement
-            budget = node.policy.budget
-            if budget.max_total_tokens and node.health.tokens_total >= budget.max_total_tokens:
+            budget_pct = self._get_budget_pct()
+
+            # Budget enforcement — planner handles graceful finalize inside chat(),
+            # this is the outer safety net at the executor level.
+            if budget_pct is not None and budget_pct >= BUDGET_FINAL_PCT:
                 logger.warning(
-                    f"Agent {node.id} exceeded token budget: "
-                    f"{node.health.tokens_total} >= {budget.max_total_tokens}"
-                )
-                break
-            if budget.max_runtime_seconds and elapsed > budget.max_runtime_seconds:
-                logger.warning(
-                    f"Agent {node.id} exceeded runtime budget: "
-                    f"{elapsed:.0f}s > {budget.max_runtime_seconds}s"
+                    f"Agent {node.id} budget at {budget_pct:.0f}% — stopping. "
+                    f"({node.health.tokens_total:,} tokens)"
                 )
                 break
 
-            # Publish progress
+            # Runtime budget check
+            if node.spec.max_runtime_seconds and elapsed > node.spec.max_runtime_seconds:
+                logger.warning(
+                    f"Agent {node.id} exceeded runtime budget: "
+                    f"{elapsed:.0f}s > {node.spec.max_runtime_seconds}s"
+                )
+                break
+
+            # Publish progress with budget info
             self.publish_event(node.path, {
                 "type": "progress",
                 "turn": turn + 1,
                 "tokens": llm.usage.total_tokens,
+                "budget_pct": round(budget_pct, 1) if budget_pct is not None else None,
                 "response_preview": response[:200] if response else "",
             })
 
@@ -219,12 +441,10 @@ class AgentExecutor:
                 node._log_event("auto_checkpoint", {"turn": turn + 1})
                 if self.db:
                     await self.db.save_agent(node)
-                    dossier = get_dossier(node.id)
-                    if dossier.get("last_updated"):
-                        await self.db.save_dossier(node.id, dossier)
 
+            # Stop requested (by finish tool, budget planner, etc.)
             if llm._stop_requested:
-                logger.info(f"Agent {node.id} finished research")
+                logger.info(f"Agent {node.id} finished (stop requested)")
                 break
 
         # Final checkpoint
@@ -238,36 +458,3 @@ class AgentExecutor:
             "type": "execution_complete",
             "total_tokens": llm.usage.total_tokens,
         })
-
-    def _build_system_prompt(self) -> str:
-        """Build the system prompt for the agent."""
-        return (
-            "You are an autonomous research agent. Your job is to thoroughly research "
-            "a person and build a comprehensive dossier.\n\n"
-            "You have these tools:\n"
-            "- web_search: Search the web (natural language queries work best)\n"
-            "- fetch_webpage: Fetch and read a specific webpage for details\n"
-            "- read_dossier: Read the current dossier to see what you already know\n"
-            "- update_dossier: Add findings to a dossier section\n"
-            "- finish_research: Signal that you're done researching\n\n"
-            "Dossier sections: basic_info, social_media, career, education, publications, news, other\n\n"
-            "Each entry you add to update_dossier should be a JSON array of objects like:\n"
-            '[{"title": "...", "url": "...", "description": "..."}]\n\n'
-            "CRITICAL WORKFLOW — you MUST follow this pattern:\n"
-            "1. Search for the person with web_search\n"
-            "2. IMMEDIATELY call update_dossier with findings BEFORE doing the next search\n"
-            "3. Repeat: search → update_dossier → search → update_dossier\n"
-            "4. NEVER batch all updates for the end — save incrementally after each search\n"
-            "5. When you've covered enough ground, call finish_research()\n\n"
-            "You have a limited token budget. If you don't save findings incrementally, "
-            "they will be LOST when the budget runs out.\n\n"
-            "Research areas to cover:\n"
-            "- Basic info (name, location, contact)\n"
-            "- Social media profiles (LinkedIn, Twitter/X, GitHub, etc.)\n"
-            "- Career history and current role\n"
-            "- Education\n"
-            "- Publications, patents, blog posts\n"
-            "- Recent news and mentions\n\n"
-            "Deduplicate information — don't add the same finding twice.\n"
-            "Be thorough but efficient. Focus on verifiable, factual information."
-        )

@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from .models import (
+    AgentSpec,
     AgentState,
     CorrectionRequest,
     InvalidTransition,
@@ -183,6 +184,27 @@ async def get_agent(path: str):
         return await _observe_redirect(path)
     if path.endswith("/log"):
         return await _log_redirect(path)
+    if path.endswith("/rollout"):
+        return await _rollout_redirect(path)
+    if path.endswith("/messages"):
+        agent_path = path.rsplit("/messages", 1)[0]
+        node = registry.resolve(agent_path)
+        if node is None:
+            raise _error(404, f"Agent not found: {agent_path}")
+        return {
+            "path": agent_path,
+            "state": node.state.value,
+            "message_count": len(node.conversation),
+            "messages": node.conversation,
+        }
+    if path.endswith("/workspace"):
+        agent_path = path.rsplit("/workspace", 1)[0]
+        node = registry.resolve(agent_path)
+        if node is None:
+            raise _error(404, f"Agent not found: {agent_path}")
+        from .workspace import list_workspace_files
+        files = list_workspace_files(node.id)
+        return {"agent": agent_path, "files": files, "count": len(files)}
 
     result = registry.subtree(path)
     if result is None:
@@ -197,7 +219,9 @@ async def get_agent(path: str):
 
 @app.post("/agents")
 async def spawn_root_agent(req: SpawnRequest):
-    """Spawn a root agent."""
+    """Spawn a root agent. Provide spec directly or reference a template."""
+    resolved = await _resolve_spec(req)
+    req.spec = resolved
     try:
         node = registry.spawn(req)
     except AgentExists as e:
@@ -206,6 +230,23 @@ async def spawn_root_agent(req: SpawnRequest):
         raise _error(422, str(e))
     _publish_event(node.path, {"type": "spawned", "path": node.path})
     return _json_response(node.to_dict(), 201)
+
+
+async def _resolve_spec(req: SpawnRequest) -> AgentSpec:
+    """Resolve a SpawnRequest to a concrete AgentSpec (from template or inline)."""
+    if req.spec:
+        return req.spec
+    if req.template:
+        if not registry.db:
+            raise _error(500, "Database not initialized")
+        tmpl = await registry.db.load_template(req.template)
+        if not tmpl:
+            raise _error(404, f"Template not found: {req.template}")
+        spec_data = tmpl["spec"]
+        if req.overrides:
+            spec_data = {**spec_data, **req.overrides}
+        return AgentSpec(**spec_data)
+    raise _error(422, "Either 'spec' or 'template' must be provided")
 
 
 @app.post("/agents/{parent_path:path}")
@@ -469,6 +510,109 @@ async def _log_redirect(path: str):
     return await stream_log(path, None)
 
 
+async def _rollout_redirect(path: str):
+    """Handle /agents/foo/rollout routed through the catch-all GET."""
+    return await stream_rollout(path, None)
+
+
+@app.get("/agents/{path:path}/rollout")
+async def stream_rollout(path: str, request: Request):
+    """SSE stream of the agent's LLM conversation — tool calls, results, responses."""
+    path = path.strip("/")
+    if path.endswith("/rollout"):
+        path = path.rsplit("/rollout", 1)[0]
+
+    node = registry.resolve(path)
+    if node is None:
+        raise _error(404, f"Agent not found: {path}")
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _observers.setdefault(path, []).append(queue)
+
+    ROLLOUT_EVENTS = {"llm_response", "tool_call", "tool_result"}
+
+    async def event_generator():
+        try:
+            # Catch-up: send recent conversation messages
+            for msg in node.conversation[-50:]:
+                yield {
+                    "event": "message",
+                    "data": json.dumps(msg, default=str),
+                }
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    if event.get("type") in ROLLOUT_EVENTS:
+                        yield {
+                            "event": event["type"],
+                            "data": json.dumps(event, default=str),
+                        }
+                except asyncio.TimeoutError:
+                    yield {"event": "keepalive", "data": "{}"}
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if queue in _observers.get(path, []):
+                _observers[path].remove(queue)
+
+    return EventSourceResponse(event_generator())
+
+
+# ---------------------------------------------------------------------------
+# Spec Templates
+# ---------------------------------------------------------------------------
+
+
+class TemplateRequest(BaseModel):
+    spec: dict  # AgentSpec fields as dict
+    description: str = ""
+
+
+@app.get("/specs")
+async def list_templates():
+    """List all available spec templates."""
+    if not registry.db:
+        raise _error(500, "Database not initialized")
+    templates = await registry.db.list_templates()
+    return {"templates": templates}
+
+
+@app.get("/specs/{name}")
+async def get_template(name: str):
+    """Get a spec template by name."""
+    if not registry.db:
+        raise _error(500, "Database not initialized")
+    tmpl = await registry.db.load_template(name)
+    if not tmpl:
+        raise _error(404, f"Template not found: {name}")
+    return tmpl
+
+
+@app.post("/specs/{name}")
+async def save_template(name: str, req: TemplateRequest):
+    """Create or update a spec template."""
+    if not registry.db:
+        raise _error(500, "Database not initialized")
+    # Validate that the spec is valid
+    try:
+        AgentSpec(**req.spec)
+    except Exception as e:
+        raise _error(422, f"Invalid spec: {e}")
+    await registry.db.save_template(name, req.spec, req.description)
+    return {"status": "saved", "name": name}
+
+
+@app.delete("/specs/{name}")
+async def delete_template(name: str):
+    """Delete a spec template."""
+    if not registry.db:
+        raise _error(500, "Database not initialized")
+    deleted = await registry.db.delete_template(name)
+    if not deleted:
+        raise _error(404, f"Template not found: {name}")
+    return {"status": "deleted", "name": name}
+
+
 # ---------------------------------------------------------------------------
 # Person Research (Demo)
 # ---------------------------------------------------------------------------
@@ -502,20 +646,3 @@ async def start_person_research(req: ResearchRequest):
     return _json_response(node.to_dict(), 201)
 
 
-@app.get("/research/{agent_id}/dossier")
-async def get_dossier(agent_id: str):
-    """Get the research dossier for an agent."""
-    from .tools.dossier import get_dossier as get_mem_dossier
-
-    # Try in-memory first
-    dossier = get_mem_dossier(agent_id)
-    if dossier.get("last_updated"):
-        return dossier
-
-    # Try database
-    if registry.db:
-        db_dossier = await registry.db.load_dossier(agent_id)
-        if db_dossier:
-            return db_dossier
-
-    raise _error(404, f"No dossier found for agent {agent_id}")

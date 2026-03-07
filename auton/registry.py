@@ -8,7 +8,6 @@ from typing import Any, Callable
 
 from .models import (
     AgentNode,
-    AgentPolicy,
     AgentSpec,
     AgentState,
     HealthSnapshot,
@@ -72,28 +71,27 @@ class AgentRegistry:
             parent = self.resolve(parent_path)
             if parent is None:
                 raise AgentNotFound(f"Parent not found: {parent_path}")
-            if len(parent.children) >= parent.policy.max_children:
+            if len(parent.children) >= parent.spec.max_children:
                 raise PolicyViolation(
-                    f"Parent {parent_path} at max_children ({parent.policy.max_children})"
+                    f"Parent {parent_path} at max_children ({parent.spec.max_children})"
                 )
             depth = parent.depth + 1
-            if depth >= parent.policy.max_depth:
+            if depth >= parent.spec.max_depth:
                 raise PolicyViolation(
-                    f"Max depth ({parent.policy.max_depth}) exceeded at {parent_path}"
+                    f"Max depth ({parent.spec.max_depth}) exceeded at {parent_path}"
                 )
             if agent_id in parent.children:
                 raise AgentExists(f"Agent {agent_id} already exists under {parent_path}")
             node = AgentNode(
                 id=agent_id,
                 spec=req.spec,
-                policy=req.policy,
                 parent_path=parent.path,
             )
             parent.children[agent_id] = node
         else:
             if agent_id in self._roots:
                 raise AgentExists(f"Root agent {agent_id} already exists")
-            node = AgentNode(id=agent_id, spec=req.spec, policy=req.policy)
+            node = AgentNode(id=agent_id, spec=req.spec)
             self._roots[agent_id] = node
 
         # Immediately transition to running
@@ -213,7 +211,7 @@ class AgentRegistry:
             raise PolicyViolation(f"Agent {path} has no checkpoints to fork from")
 
         fork_id = new_id or f"{node.id}-fork-{uuid.uuid4().hex[:4]}"
-        req = SpawnRequest(id=fork_id, spec=node.spec, policy=node.policy)
+        req = SpawnRequest(id=fork_id, spec=node.spec)
         forked = self.spawn(req, parent_path=node.parent_path)
         forked._log_event("forked", {"from": path, "checkpoint": node.checkpoints[-1]["id"]})
         return forked
@@ -244,9 +242,9 @@ class AgentRegistry:
         node = self.resolve(path)
         if node is None:
             raise AgentNotFound(path)
-        if node.restart_count >= node.policy.max_restarts:
+        if node.restart_count >= node.spec.max_restarts:
             raise PolicyViolation(
-                f"Agent {path} exceeded max_restarts ({node.policy.max_restarts})"
+                f"Agent {path} exceeded max_restarts ({node.spec.max_restarts})"
             )
         # Terminate and re-spawn in place
         old_state = node.state
@@ -277,7 +275,7 @@ class AgentRegistry:
         """Create and start an executor for an agent."""
         from auton.executor import AgentExecutor
 
-        executor = AgentExecutor(node, self.publish_event, self.db)
+        executor = AgentExecutor(node, self.publish_event, self.db, registry=self)
         self._executors[node.path] = executor
         executor.start()
         logger.info(f"Started executor for {node.path}")
@@ -298,11 +296,9 @@ class AgentRegistry:
         from datetime import datetime
 
         spec = AgentSpec(**data["spec"])
-        policy = AgentPolicy(**data["policy"])
         node = AgentNode(
             id=data["id"],
             spec=spec,
-            policy=policy,
             parent_path=data.get("parent_path"),
         )
         # Restore state without transition validation

@@ -1,0 +1,325 @@
+"""Tests for agent coordination tools: spawn_child, message, list_children."""
+
+import asyncio
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+import httpx
+
+from auton.api import app, registry, _publish_event
+from auton.models import AgentSpec, AgentState, SpawnRequest
+from auton.tools.coordination import (
+    make_check_child_status,
+    make_list_children,
+    make_message_child,
+    make_spawn_child,
+)
+from auton.workspace import cleanup_workspace
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def clean_workspaces():
+    """Clean up test workspaces after each test."""
+    yield
+    for name in ["test-parent", "child-1", "child-2", "child-0", "test-coord"]:
+        cleanup_workspace(name)
+
+
+def _spawn_no_executor(req: SpawnRequest, parent_path=None):
+    """Spawn an agent without starting an executor (for sync unit tests)."""
+    saved = registry.publish_event
+    registry.publish_event = None
+    try:
+        return registry.spawn(req, parent_path=parent_path)
+    finally:
+        registry.publish_event = saved
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for coordination tools
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_child_via_tool():
+    """spawn_child creates a child agent in the tree."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    # Create parent agent (no executor)
+    parent_spec = AgentSpec(
+        name="Parent",
+        system_prompt="You are a coordinator.",
+        goal="Manage children",
+    )
+    parent = _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+    assert parent.state == AgentState.RUNNING
+
+    # Use spawn_child tool — it will also spawn without executor since publish_event
+    # triggers _start_executor which needs an event loop. We mock it.
+    with patch.object(registry, '_start_executor'):
+        spawn_fn = make_spawn_child("test-parent", "test-parent", registry)
+        result = json.loads(spawn_fn(
+            child_id="child-1",
+            name="Worker 1",
+            system_prompt="You are a worker agent.",
+            goal="Do some work",
+            tools='["write_file", "shell_exec"]',
+        ))
+
+    assert result["status"] == "OK"
+    assert result["child_id"] == "child-1"
+    assert result["child_path"] == "test-parent/child-1"
+
+    # Verify child is in the tree
+    child = registry.resolve("test-parent/child-1")
+    assert child is not None
+    assert child.spec.name == "Worker 1"
+    assert child.spec.goal == "Do some work"
+    assert "write_file" in child.spec.tools
+    assert "shell_exec" in child.spec.tools
+
+
+def test_spawn_child_max_children():
+    """spawn_child respects max_children limit."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    parent_spec = AgentSpec(
+        name="Parent",
+        system_prompt="You are a coordinator.",
+        goal="Manage children",
+        max_children=1,
+    )
+    parent = _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+
+    with patch.object(registry, '_start_executor'):
+        spawn_fn = make_spawn_child("test-parent", "test-parent", registry)
+
+        # First child should succeed
+        result = json.loads(spawn_fn("child-1", "Worker 1", "Prompt", "Goal"))
+        assert result["status"] == "OK"
+
+        # Second child should fail (max_children=1)
+        result = json.loads(spawn_fn("child-2", "Worker 2", "Prompt", "Goal"))
+        assert result["status"] == "error"
+        assert "max_children" in result["message"]
+
+
+def test_message_child_via_tool():
+    """message_agent delivers message to target agent."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    # Create parent and child (no executors)
+    parent_spec = AgentSpec(
+        name="Parent",
+        system_prompt="Coordinator.",
+        goal="Manage",
+    )
+    _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+
+    child_spec = AgentSpec(
+        name="Child",
+        system_prompt="Worker.",
+        goal="Work",
+    )
+    _spawn_no_executor(SpawnRequest(id="child-1", spec=child_spec), parent_path="test-parent")
+
+    # Send message
+    msg_fn = make_message_child("test-parent", registry)
+    result = json.loads(msg_fn("test-parent/child-1", "Please do X next"))
+    assert result["status"] == "OK"
+    assert result["delivered"] is True
+
+    # Verify message is in child's messages
+    child = registry.resolve("test-parent/child-1")
+    assert len(child.messages) == 1
+    assert child.messages[0]["content"] == "Please do X next"
+    assert child.messages[0]["channel"] == "agent"
+
+
+def test_message_agent_not_found():
+    """message_agent returns error for nonexistent agent."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    msg_fn = make_message_child("test-parent", registry)
+    result = json.loads(msg_fn("nonexistent/agent", "hello"))
+    assert result["status"] == "error"
+
+
+def test_list_children():
+    """list_children returns info about all child agents."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    # Create parent with children (no executors)
+    parent_spec = AgentSpec(
+        name="Parent",
+        system_prompt="Coordinator.",
+        goal="Manage",
+        max_children=10,
+    )
+    _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+
+    for i in range(3):
+        child_spec = AgentSpec(
+            name=f"Worker {i}",
+            system_prompt="Worker.",
+            goal=f"Task {i}",
+        )
+        _spawn_no_executor(SpawnRequest(id=f"child-{i}", spec=child_spec), parent_path="test-parent")
+
+    # List children
+    list_fn = make_list_children("test-parent", "test-parent", registry)
+    result = json.loads(list_fn())
+    assert result["status"] == "OK"
+    assert result["count"] == 3
+    assert len(result["children"]) == 3
+
+    # Verify child info
+    child_ids = [c["id"] for c in result["children"]]
+    assert "child-0" in child_ids
+    assert "child-1" in child_ids
+    assert "child-2" in child_ids
+
+    for child in result["children"]:
+        assert "state" in child
+        assert "name" in child
+        assert "goal" in child
+
+
+def test_check_child_status():
+    """check_child_status returns detailed agent status."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    parent_spec = AgentSpec(
+        name="Parent",
+        system_prompt="Coordinator.",
+        goal="Manage",
+    )
+    _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+
+    child_spec = AgentSpec(
+        name="Worker",
+        system_prompt="Worker.",
+        goal="Do research",
+    )
+    _spawn_no_executor(SpawnRequest(id="child-1", spec=child_spec), parent_path="test-parent")
+
+    check_fn = make_check_child_status("test-parent", registry)
+    result = json.loads(check_fn("test-parent/child-1"))
+    assert result["status"] == "OK"
+    assert result["state"] == "running"
+    assert result["name"] == "Worker"
+    assert result["goal"] == "Do research"
+
+
+def test_check_child_status_idle_includes_response():
+    """check_child_status includes last_response when agent is idle."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    parent_spec = AgentSpec(
+        name="Parent",
+        system_prompt="Coordinator.",
+        goal="Manage",
+    )
+    _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+
+    child_spec = AgentSpec(
+        name="Worker",
+        system_prompt="Worker.",
+        goal="Work",
+    )
+    child = _spawn_no_executor(SpawnRequest(id="child-1", spec=child_spec), parent_path="test-parent")
+
+    # Simulate idle state with conversation
+    child.conversation = [
+        {"role": "user", "content": "Do the task"},
+        {"role": "assistant", "content": "Task completed successfully. Here are my findings."},
+    ]
+    child.transition(AgentState.IDLE)
+
+    check_fn = make_check_child_status("test-parent", registry)
+    result = json.loads(check_fn("test-parent/child-1"))
+    assert result["status"] == "OK"
+    assert result["state"] == "idle"
+    assert "last_response" in result
+    assert "Task completed" in result["last_response"]
+
+
+def test_check_child_not_found():
+    """check_child_status returns error for nonexistent agent."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    check_fn = make_check_child_status("test-parent", registry)
+    result = json.loads(check_fn("nonexistent"))
+    assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# Integration: coordinator agent spawns children via API
+# ---------------------------------------------------------------------------
+
+
+def _make_llm_response(content="", tool_calls=None):
+    """Build a mock LLM API response."""
+    msg = {"content": content, "tool_calls": tool_calls}
+    resp = MagicMock()
+    resp.model_dump.return_value = {
+        "choices": [{"message": msg}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+    }
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_spawn_coordinator_with_coordination_tools():
+    """POST /agents with coordination tools registers them correctly."""
+    mock_resp = _make_llm_response(content="Spawned children.")
+    registered_tools = []
+
+    with patch("auton.llm.acompletion", new_callable=AsyncMock, return_value=mock_resp):
+        from auton.llm import LLMClient
+        original_add = LLMClient.add_tool
+
+        def tracking_add(self, func, schema):
+            registered_tools.append(schema["name"])
+            return original_add(self, func, schema)
+
+        with patch("auton.llm.LLMClient.add_tool", tracking_add):
+            registry.publish_event = _publish_event
+            registry.db = None
+
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post("/agents", json={
+                    "id": "test-coord",
+                    "spec": {
+                        "name": "Coordinator",
+                        "goal": "Manage sub-agents",
+                        "system_prompt": "You spawn and coordinate child agents.",
+                        "tools": [
+                            "spawn_child", "message_agent",
+                            "list_children", "check_child_status",
+                        ],
+                    },
+                })
+                assert resp.status_code == 201
+                await asyncio.sleep(0.5)
+
+    # Coordination tools should be registered
+    assert "spawn_child" in registered_tools
+    assert "message_agent" in registered_tools
+    assert "list_children" in registered_tools
+    assert "check_child_status" in registered_tools
