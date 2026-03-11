@@ -23,6 +23,7 @@ from .models import (
     SpawnRequest,
     SuspendRequest,
 )
+from .auth import auth_middleware, log_auth_status
 from .oversight import OversightEngine
 from .registry import AgentExists, AgentNotFound, AgentRegistry, PolicyViolation
 
@@ -81,6 +82,9 @@ async def lifespan(app: FastAPI):
     # Load API keys from .env files
     _load_all_env()
 
+    # Log authentication status
+    log_auth_status()
+
     # Register global tools
     register_tool(web_search)
     register_tool(fetch_webpage)
@@ -132,9 +136,17 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.middleware("http")(auth_middleware)
 
 registry = AgentRegistry()
 oversight = OversightEngine(registry)
+
+
+@app.get("/health")
+async def health():
+    """Service health check. No authentication required."""
+    agent_count = sum(1 for _ in registry._roots.values())
+    return {"status": "ok", "agents": agent_count}
 
 # SSE subscribers: path → list of asyncio.Queue
 _observers: dict[str, list[asyncio.Queue]] = {}

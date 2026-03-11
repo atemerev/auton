@@ -2,13 +2,13 @@
 
 ---
 
-## Slide 1: The $4.1M Mistake
+## Slide 1: The Problem Is Already Here
 
-**In January 2026, a Fortune 500 company left an AI agent running overnight.**
+**AI agents are going autonomous. The bills — and the failures — are piling up.**
 
-It was supposed to research competitor pricing. Instead, it hallucinated a new goal, spawned 47 sub-agents, made 12,000 API calls, and charged $4.1 million to their cloud account before anyone noticed at 8am.
+Developers are reporting five- and six-figure surprise bills from autonomous agents left running unsupervised. Research agents that hallucinate new goals and spawn sub-agents. Coding agents stuck in loops, retrying the same failing call thousands of times. The pattern repeats: launch an agent, go to sleep, wake up to a disaster.
 
-This isn't hypothetical. This is what happens when you give autonomous software a credit card and no supervision.
+Every team deploying agents in production has a story like this. Most have several.
 
 **The AI industry built the engine. Nobody built the brakes.**
 
@@ -84,7 +84,7 @@ As budget runs low, the system *gradually constrains* the agent:
 
 **The result:** Instead of a dead agent and a big bill, you get a finished deliverable and a predictable bill.
 
-This is patentable. No one else does this.
+This is our core technical moat. No one else does this.
 
 ---
 
@@ -185,20 +185,23 @@ The agent infrastructure stack is forming clear tiers:
 ### What's built vs. what's next.
 
 **✅ Built and working today:**
-- Full agent lifecycle management (spawn, supervise, kill)
-- Supervision trees with automatic recovery
-- Budget system with intelligent finalization
-- Real-time oversight (drift detection, loop detection, coherence monitoring)
-- Live observation streams
-- Checkpoint and fork (pause, resume, branch agents)
+- Full agent lifecycle management (spawn, supervise, suspend, resume, kill)
+- Supervision trees with automatic recovery (OTP-inspired)
+- Budget system with intelligent finalization and write gate
+- LLM judge drift detection — evaluates goal progress, not just topic similarity
+- Loop detection with auto-suspension
+- Live observation streams (SSE)
+- Checkpoint, fork, and restart
+- API key authentication
+- SQLite persistence
 - Open HTTP API — works from any language
 
-**Proven in production:** Lethe, a persistent-memory AI assistant built on Auton's architecture, runs 24/7 handling complex multi-agent tasks. The patterns aren't theoretical — they're battle-tested.
+**Origin:** Auton's core patterns are extracted from Lethe, a persistent-memory AI system running in production. The architecture is proven — not theoretical.
 
 **Next 6 months:**
 - Web dashboard (observe and control agents visually)
-- Persistent storage (currently in-memory)
-- Multi-model support (currently Anthropic; adding OpenAI, Gemini, local)
+- PostgreSQL + horizontal scaling
+- Multi-model support (currently via LiteLLM; expanding provider coverage)
 - Integration adapters for Temporal, Daytona, Flyte
 - 3 enterprise design partners
 - Auton Cloud beta launch

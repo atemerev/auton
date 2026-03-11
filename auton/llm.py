@@ -163,7 +163,14 @@ class LLMClient:
                             t_id = tc.get("id") or f"call-{uuid.uuid4().hex[:12]}"
                             try:
                                 t_args = json.loads(tc["function"]["arguments"])
-                            except json.JSONDecodeError:
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Finalize tool {t_name} malformed args: {e}")
+                                self.messages.append({
+                                    "role": "tool",
+                                    "content": f"Error: malformed arguments - {e}",
+                                    "tool_call_id": t_id,
+                                    "name": t_name,
+                                })
                                 continue
                             handler = self.get_tool(t_name)
                             if handler:

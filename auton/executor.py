@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timezone
 
 from auton.budget import BudgetPlanner
+from auton.drift import DRIFT_CHECK_INTERVAL, judge_drift
 from auton.llm import LLMClient
 from auton.models import AgentNode, AgentState, SuspendReason
 from auton.tools import TOOL_REGISTRY, function_to_schema
@@ -407,6 +408,28 @@ class AgentExecutor:
                 node.health.token_rate = node.health.tokens_total / (elapsed / 3600)
             node.health.last_check = datetime.now(timezone.utc)
 
+            # Drift detection via LLM judge (every N turns to limit cost)
+            if (turn + 1) % DRIFT_CHECK_INTERVAL == 0 and llm.messages:
+                try:
+                    coherence, drift, assessment = await judge_drift(
+                        node.spec.goal, llm.messages,
+                        prev_coherence=node.health.coherence,
+                    )
+                    node.health.coherence = coherence
+                    node.health.drift = drift
+                    logger.info(
+                        f"Agent {node.id} drift: coherence={coherence:.3f}, "
+                        f"drift={drift:.3f} — {assessment}"
+                    )
+                    self.publish_event(node.path, {
+                        "type": "drift_check",
+                        "coherence": coherence,
+                        "drift": drift,
+                        "assessment": assessment,
+                    })
+                except Exception as e:
+                    logger.warning(f"Drift check failed for {node.id}: {e}")
+
             budget_pct = self._get_budget_pct()
 
             # Budget enforcement — planner handles graceful finalize inside chat(),
@@ -448,9 +471,10 @@ class AgentExecutor:
                 break
 
         # Final checkpoint
+        turns_completed = turn + 1 if node.spec.max_turns > 0 else 0
         node.checkpoint()
         node._log_event("execution_complete", {
-            "turns": turn + 1 if 'turn' in dir() else 0,
+            "turns": turns_completed,
             "total_tokens": llm.usage.total_tokens,
         })
 
