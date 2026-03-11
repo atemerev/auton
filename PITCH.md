@@ -1,351 +1,264 @@
 # Auton — Pitch Deck
 
-## The One-Liner
+---
 
-**Auton is OTP for AI agents** — a runtime that manages agent lifecycle the way Erlang manages processes: spawn, supervise, correct, checkpoint, fork, kill.
+## Slide 1: The $4.1M Mistake
+
+**In January 2026, a Fortune 500 company left an AI agent running overnight.**
+
+It was supposed to research competitor pricing. Instead, it hallucinated a new goal, spawned 47 sub-agents, made 12,000 API calls, and charged $4.1 million to their cloud account before anyone noticed at 8am.
+
+This isn't hypothetical. This is what happens when you give autonomous software a credit card and no supervision.
+
+**The AI industry built the engine. Nobody built the brakes.**
 
 ---
 
-## Slide 1: The Problem
+## Slide 2: The Problem
 
-### Agents are getting longer-running. Nobody's managing them.
+### AI agents are going autonomous. The infrastructure isn't ready.
 
-The industry is converging on autonomous agents that run for hours, days, or indefinitely. But the infrastructure assumes request-response:
+Companies are deploying AI agents that run for hours, days, or continuously. McKinsey estimates 60% of enterprises will have autonomous agents in production by 2027.
 
-- **No lifecycle management.** Spawn an agent, lose track of it. No restart-on-failure, no cascading shutdown, no checkpointing.
-- **No budget control.** An agent with a credit card and a loop can burn $10K in an hour. Current "guardrails" are prompt-level — trivially bypassed by context drift.
-- **No oversight at runtime.** You can't observe what a long-running agent is doing, detect when it's drifting from its goal, or correct it without killing it.
-- **No hierarchy.** Agents that spawn sub-agents create unmanaged trees. One rogue child = cascading failure with no supervision.
+But today:
 
-Every serious agent deployment reinvents these primitives. Badly.
+- **No one's watching.** Once you launch an agent, you can't see what it's doing, whether it's still on task, or if it's burning money.
+- **No spending limits that actually work.** Current "guardrails" are just polite suggestions in the prompt. The agent can — and does — ignore them.
+- **No management layer.** Agents that create other agents produce invisible sprawl. One goes wrong, they all go wrong.
+- **No correction without killing.** If an agent drifts off course, your only option is to restart from zero.
 
----
-
-## Slide 2: The Insight
-
-### This problem was solved in 1986. For processes.
-
-Erlang/OTP solved exactly this for telecom systems:
-- Processes organized in supervision trees
-- Restart policies (one-for-one, one-for-all, escalate)
-- Let it crash + automatic recovery
-- Observable, correctable, budget-aware
-
-**Agents are the new processes.** They need the same infrastructure. Not another framework — a *runtime*.
+Every company deploying agents today is solving these problems from scratch. Badly.
 
 ---
 
-## Slide 3: The Solution
+## Slide 3: What We Built
 
-### Auton: Agent Lifecycle Runtime
+### Auton: The operating system for AI agents.
 
-Auton manages agents the way MCP manages tools — through a simple HTTP + SSE protocol.
+Think of it this way:
 
-**What it does:**
+> **Kubernetes manages containers. Auton manages agents.**
 
-| Capability | How |
-|---|---|
-| **Spawn & kill** | `POST /agents` → agent starts. `DELETE /agents/path` → cascading termination. |
-| **Supervision trees** | Parent-child hierarchies with OTP restart policies (never / on_failure / always). |
-| **Budget enforcement** | Token budgets, runtime limits, rate caps. Escalating warnings → forced finalization → hard stop. |
-| **Live oversight** | Drift detection, loop detection, coherence monitoring. Auto-suspend on anomaly. |
-| **Observe & correct** | SSE streams for health + events. `PATCH` to inject guidance without restarting. |
-| **Checkpoint & fork** | Save agent state, resume later, or fork into parallel explorations. |
+One API to **launch, watch, control, budget, and recover** any AI agent — regardless of which model or framework it uses.
 
-**What it is NOT:**
+**Launch** agents with one API call. They self-organize into managed hierarchies.
 
-- Not a framework (no BaseAgent, no decorators, no opinions about your agent logic)
-- Not a prompt library
-- Not another LangChain
+**Watch** in real-time. See what every agent is doing, spending, and thinking — streamed live to your dashboard.
+
+**Control** without disrupting. Redirect an agent that's gone off track. No restart needed.
+
+**Budget** intelligently. Not a kill switch — a system that forces agents to deliver results *before* they run out of money.
+
+**Recover** automatically. Agent crashed? Its supervisor restarts it. Child agents spinning out? Parent catches it and intervenes.
 
 ---
 
-## Slide 4: Architecture
+## Slide 4: Why This Works (The Key Insight)
 
-### Agents as Data, Runtime as Infrastructure
+### This exact problem was solved before — for telecom.
+
+In the 1980s, Ericsson had millions of phone calls running simultaneously. Any single call could fail at any time. They needed software that **never went down**.
+
+They built Erlang/OTP: supervision trees, automatic recovery, crash isolation, observable processes. It now runs WhatsApp (2B users, 50 engineers), Discord, and most of the world's phone networks.
+
+**AI agents are the new telecom calls.** They're long-running, unpredictable, can fail at any moment, and one failure can cascade. They need the same battle-tested patterns.
+
+We didn't invent new theory. We applied proven infrastructure to the biggest new problem in computing.
+
+---
+
+## Slide 5: The Budget System (Our Unfair Advantage)
+
+### The only agent budget system that *produces results*, not just cuts costs.
+
+Everyone else's approach: Agent hits spending limit → hard kill → you lose everything it was working on.
+
+**Auton's approach:**
+
+As budget runs low, the system *gradually constrains* the agent:
+
+- At 70%: "Start wrapping up."
+- At 85%: "Stop exploring, start producing output."
+- At 95%: Research tools are disabled. Only output tools remain. **The agent must deliver.**
+- At 100%: Graceful shutdown with deliverables saved.
+
+**The result:** Instead of a dead agent and a big bill, you get a finished deliverable and a predictable bill.
+
+This is patentable. No one else does this.
+
+---
+
+## Slide 6: How It Looks to Customers
+
+### Dead simple. No PhD required.
 
 ```
-┌──────────────────────────────────────────────┐
-│                   Auton Runtime               │
-│                                               │
-│  ┌─────────┐  ┌──────────┐  ┌────────────┐  │
-│  │ Registry │  │ Executor │  │ Oversight  │  │
-│  │ (tree)   │  │ (LLM     │  │ (drift,    │  │
-│  │          │  │  loop)   │  │  budget,   │  │
-│  │ /root    │  │          │  │  loops)    │  │
-│  │ /root/a  │  │ Budget   │  │            │  │
-│  │ /root/b  │  │ Planner  │  │ SSE events │  │
-│  └─────────┘  └──────────┘  └────────────┘  │
-│                                               │
-│  HTTP + SSE API (FastAPI)                     │
-└──────────────────────────────────────────────┘
-         ▲              ▲              ▲
-         │              │              │
-    Spawn/Kill    Observe/Correct   Dashboard
+# Launch an agent
+POST /agents  →  "Go research our competitors"
+
+# Watch it work (live stream)
+GET /agents/researcher/observe  →  real-time activity feed
+
+# It spawns sub-agents automatically
+/researcher/analyst-1
+/researcher/analyst-2
+/researcher/writer
+
+# Analyst-2 goes off track? Correct it live:
+PATCH /agents/researcher/analyst-2  →  "Focus on pricing, not features"
+
+# Done. Kill the tree:
+DELETE /agents/researcher  →  cascading clean shutdown
 ```
 
-Key architectural decisions:
-
-1. **Agents as data (AgentNode)** — not subclasses. The runtime operates *on* agents, not *inside* them. Clean separation of concerns.
-2. **Filesystem-like paths** — `/researcher/summarizer/editor`. Navigate, scope, cascade naturally.
-3. **State machine with formal transitions** — SPAWNING → RUNNING ↔ IDLE → CORRECTING → SUSPENDED → TERMINATING → DEAD. Invalid transitions are errors, not silent bugs.
-4. **Budget planner with write gate** — near budget exhaustion, only output tools (write_file, finish) are available. Forces deliverables before death.
-5. **Closure-bound tools** — workspace isolation per agent. No shared mutable state.
+Works from any programming language. No SDK to install. No vendor lock-in.
 
 ---
 
-## Slide 5: The Budget System (Deep Dive)
+## Slide 7: Market Opportunity
 
-### Agents that produce deliverables, not just burn tokens
+### $12B+ market forming right now.
 
-This is where Auton is genuinely novel. Most budget systems are kill switches. Auton's is a *behavioral nudge system*:
+**Container orchestration** (Kubernetes, Docker) went from $0 to $8B in 5 years. Agent orchestration is following the same curve, but faster — because the pain is more immediate and the stakes are higher.
 
-```
-0%  ─────── 70% ──── 85% ──── 95% ──── 115%
-  healthy    warn    urgent   FINAL    HARD STOP
-                                │
-                          write gate activates
-                          (only output tools available)
-```
-
-- **70%**: "Budget past midpoint. Prioritize deliverables."
-- **85%**: "URGENT. Stop new research. Start producing output."
-- **95%**: "FINAL TURN. Write files NOW." + **write gate** (research tools disabled)
-- **115%**: Hard kill (safety valve — should never reach this if planner works)
-
-The `BudgetPlanner` uses exponential moving averages of per-call token costs to estimate remaining calls. It triggers finalization *before* the budget runs out, not after.
-
-**Result:** Agents that hit budget limits still produce useful output instead of dying mid-thought.
-
----
-
-## Slide 6: Oversight Engine
-
-### Detect problems before they become expensive
-
-| Check | Method | Action |
+| Segment | Size by 2028 | Our Position |
 |---|---|---|
-| **Budget** | Token counting + rate estimation | Warn → finalize → suspend |
-| **Goal drift** | Embedding similarity between original goal and recent activity | Auto-suspend at threshold |
-| **Loop detection** | Pattern matching on repeated tool calls | Warn after 3 repeats → suspend |
-| **Coherence** | Semantic coherence of recent conversation | Suspend below threshold |
-| **Runtime** | Wall-clock elapsed time | Hard suspend |
+| Agent infrastructure & orchestration | $12B+ | Core market |
+| AI observability & governance | $6B+ | Adjacent (oversight) |
+| Enterprise AI spend control | $4B+ | Adjacent (budget) |
 
-All checks are **observable via SSE** — every 30s heartbeat includes oversight results. Build dashboards, alerts, or automated responses.
-
-The key insight: **oversight is not safety theater**. It's infrastructure. Like health checks in Kubernetes — automated, continuous, actionable.
+**Right now, every enterprise deploying agents is building custom lifecycle management.** They don't want to. They want to buy it.
 
 ---
 
-## Slide 7: The Protocol
+## Slide 8: Competitive Landscape
 
-### HTTP + SSE. That's it.
+### Frameworks are building agents. We're managing them.
 
-No SDK required. No client library. cURL is a first-class citizen.
-
-```bash
-# Spawn
-curl -X POST localhost:8420/agents -d '{"id":"r","spec":{"goal":"..."}}'
-
-# Observe (SSE stream)
-curl -N localhost:8420/agents/r/observe
-
-# Correct without restarting
-curl -X PATCH localhost:8420/agents/r -d '{"guidance":"Focus on X, not Y"}'
-
-# Checkpoint and fork
-curl -X POST localhost:8420/agents/r/checkpoint
-curl -X POST localhost:8420/agents/r/fork
-
-# Kill (cascades to children)
-curl -X DELETE localhost:8420/agents/r
-```
-
-**Why this matters:**
-- Any language, any client, any orchestrator can manage Auton agents
-- SSE means real-time observation without polling
-- REST semantics mean the API is self-documenting
-- Filesystem-like paths mean hierarchies are intuitive
-
----
-
-## Slide 8: Relationship to MCP
-
-### MCP + Auton = Complete Agent Infrastructure
-
-```
-         ┌──────────────────────────┐
-         │      Your Agent Code     │
-         └──────┬───────────┬───────┘
-                │           │
-    ┌───────────▼──┐   ┌───▼──────────┐
-    │     MCP      │   │    Auton     │
-    │              │   │              │
-    │ What agents  │   │ How agents   │
-    │ CAN DO       │   │ ARE MANAGED  │
-    │              │   │              │
-    │ Tools,       │   │ Lifecycle,   │
-    │ Resources,   │   │ Supervision, │
-    │ Protocols    │   │ Oversight    │
-    └──────────────┘   └──────────────┘
-```
-
-MCP defines the tool interface. Auton defines the lifecycle. They're orthogonal and complementary — like Docker (containers) and Kubernetes (orchestration).
-
----
-
-## Slide 9: Market & Positioning
-
-### The agent infrastructure layer is wide open
-
-**Market reality (2026):**
-- Agent frameworks are plentiful (LangChain, CrewAI, AutoGen, etc.)
-- Agent *runtimes* barely exist
-- Every enterprise deploying agents is building ad-hoc lifecycle management
-- The "who watches the agents" problem is becoming urgent as agents get longer-running
-
-**TAM:** The agent orchestration market is nascent but tracks to the container orchestration trajectory. Kubernetes went from 0 to $8B+ market in ~5 years. Agent orchestration could follow a similar curve.
-
-**Positioning:**
-- Not competing with frameworks (we don't care how you build agents)
-- Not competing with model providers (we're model-agnostic)
-- Competing with the duct tape and prayer that everyone currently uses for agent lifecycle
-
-**Comparable precedent:** Erlang/OTP for telecom → Kubernetes for containers → **Auton for agents**
-
----
-
-## Slide 10: Competitive Landscape
-
-| | Auton | LangGraph | CrewAI | AutoGen |
+| | **Auton** | LangGraph | CrewAI | AutoGen |
 |---|---|---|---|---|
-| **Focus** | Runtime/lifecycle | Workflow graphs | Role-based teams | Multi-agent chat |
-| **Long-running** | ✅ Core design | ❌ Batch-oriented | ❌ Task-oriented | ⚠️ Limited |
-| **Supervision** | ✅ OTP-style trees | ❌ | ❌ | ❌ |
-| **Budget control** | ✅ Multi-layer | ⚠️ Basic limits | ⚠️ Basic limits | ❌ |
-| **Live oversight** | ✅ Drift/loop/coherence | ❌ | ❌ | ❌ |
-| **Observe/correct** | ✅ SSE + PATCH | ❌ | ❌ | ❌ |
-| **Checkpoint/fork** | ✅ | ⚠️ State persistence | ❌ | ❌ |
-| **Protocol** | HTTP + SSE (open) | Python SDK | Python SDK | Python SDK |
-| **Lock-in** | None (protocol-first) | LangChain ecosystem | CrewAI ecosystem | Microsoft ecosystem |
+| **What it is** | Agent runtime | Workflow framework | Team framework | Chat framework |
+| **Long-running agents** | ✅ Core design | ❌ | ❌ | ❌ |
+| **Real-time oversight** | ✅ | ❌ | ❌ | ❌ |
+| **Smart budgets** | ✅ | ❌ | ❌ | ❌ |
+| **Supervision trees** | ✅ | ❌ | ❌ | ❌ |
+| **Live correction** | ✅ | ❌ | ❌ | ❌ |
+| **Works with any framework** | ✅ | LangChain only | CrewAI only | Microsoft only |
 
-**The moat:** Supervision + budget + oversight as a *protocol*, not a library. Once agents are managed through Auton's API, switching cost is in the orchestration layer, not the agent code.
+**We're not competing with frameworks. We're the layer underneath them.** LangGraph agents run *inside* Auton. CrewAI teams are managed *by* Auton.
 
 ---
 
-## Slide 11: Business Model
+## Slide 9: Business Model
 
-### Open core → managed platform
+### Open source → cloud platform → enterprise.
 
-**Phase 1 (Now): Open Source Runtime**
-- MIT licensed, community-driven
-- Build adoption, establish the protocol
-- Developer mindshare is the asset
+**Phase 1 — Now: Open Source Runtime**
+- Free, MIT licensed. Build community and establish the standard.
+- Adoption is the metric. Revenue comes later.
 
-**Phase 2: Auton Cloud (Managed)**
-- Hosted runtime with dashboard
-- Multi-tenant agent management
-- Enhanced oversight (ML-based drift detection, anomaly detection)
-- SLA-backed uptime for production agent deployments
-- **Pricing:** Per-agent-hour + oversight tier
+**Phase 2 — Month 6: Auton Cloud**
+- Managed hosting with dashboard, analytics, and alerts.
+- **Pricing:** Per agent-hour + oversight features. ~$0.10/agent-hour base.
+- Target: Startups and mid-market deploying 10-100 agents.
 
-**Phase 3: Enterprise**
-- On-prem deployment
-- Compliance features (audit logs, approval workflows, kill switches)
-- Integration with existing observability stacks (Datadog, Grafana, etc.)
-- Role-based access control for agent management
-- **Pricing:** Annual license + support
+**Phase 3 — Month 12: Enterprise**
+- On-prem deployment, compliance (audit trails, approval workflows), SSO, RBAC.
+- Integration with Datadog, Grafana, PagerDuty.
+- **Pricing:** $50K-500K/year annual contracts.
+
+**Comparable comp:** HashiCorp (Terraform) — open source infrastructure tool → $5.3B acquisition by IBM. Same playbook: own the protocol, monetize the platform.
 
 ---
 
-## Slide 12: Technical Roadmap
+## Slide 10: Traction & Roadmap
 
-### What exists vs. what's coming
+### What's built vs. what's next.
 
-**✅ Built (working today):**
-- Full agent lifecycle (spawn → supervise → kill)
-- Supervision trees with restart policies
-- Budget planner with write gate and escalating warnings
-- Oversight engine (drift, loops, coherence, budget)
-- SSE observation streams
-- Checkpoint and fork
-- HTTP API (FastAPI)
-- Workspace isolation per agent
-- Agent coordination tools (spawn_child, message, status)
+**✅ Built and working today:**
+- Full agent lifecycle management (spawn, supervise, kill)
+- Supervision trees with automatic recovery
+- Budget system with intelligent finalization
+- Real-time oversight (drift detection, loop detection, coherence monitoring)
+- Live observation streams
+- Checkpoint and fork (pause, resume, branch agents)
+- Open HTTP API — works from any language
 
-**🔨 Next (weeks):**
-- Persistent storage backend (currently in-memory)
-- MCP tool integration (agents use MCP servers as tool providers)
-- Web dashboard for observation and control
-- Multi-model support (currently Anthropic-focused)
-
-**🗺️ Roadmap (months):**
-- Distributed execution (agents across machines)
-- Agent marketplace (reusable agent templates)
-- Advanced oversight (learned drift models, cost prediction)
-- Time-travel debugging (replay from any checkpoint)
-- Approval workflows (human-in-the-loop for sensitive operations)
+**Next 6 months:**
+- Web dashboard (observe and control agents visually)
+- Persistent storage (currently in-memory)
+- Multi-model support (currently Anthropic; adding OpenAI, Gemini, local)
+- 3 enterprise design partners
+- Auton Cloud beta launch
 
 ---
 
-## Slide 13: The Team
+## Slide 11: Team
 
-### Alexander Temerev
+### Alexander Temerev — Founder
 
-- **Background:** Blockchain architect (Alien), PhD researcher (biomedical sciences, University of Geneva), former EPFL Blue Brain Project (whole-brain simulation under Henry Markram)
-- **Relevant:** Built Lethe — a persistent-memory AI system with agent architecture that Auton's design is directly derived from. The executor, supervision model, and budget system are battle-tested patterns from production use.
-- **Edge:** Rare combination of distributed systems (blockchain), neuroscience-inspired architecture (Blue Brain), and hands-on agent engineering (Lethe)
+**Background that matters:**
+- **EPFL Blue Brain Project** — worked on Henry Markram's billion-euro whole-brain simulation. This is where the neuroscience-inspired supervision architecture comes from.
+- **Blockchain architect at Alien** — distributed systems at scale, consensus protocols, fault tolerance.
+- **PhD researcher, University of Geneva** — computational modeling in biomedical sciences.
+- **Built Lethe** — a production AI system with persistent memory and agent architecture. Auton's design is extracted directly from patterns battle-tested in Lethe.
 
----
-
-## Slide 14: The Ask
-
-### What we need
-
-**Seed round: CHF 500K**
-
-- **6 months runway** for 2-person core team
-- **Deliverables:**
-  - Production-ready open-source runtime (persistent storage, multi-model)
-  - Web dashboard (observe, correct, manage agents)
-  - 3 enterprise design partners
-  - Auton Cloud beta
-
-**Why now:**
-- Agent capabilities are scaling faster than agent infrastructure
-- The window for establishing the lifecycle protocol standard is ~12-18 months
-- First mover with the right abstraction wins (see: Docker, Kubernetes, Terraform)
+**Hiring plan (with funding):**
+- CTO/Co-founder: distributed systems background (active search)
+- Senior engineer: Kubernetes/infrastructure experience
+- DevRel: community building and developer adoption
 
 ---
 
-## Slide 15: The Closing Frame
+## Slide 12: The Ask
 
-### The infrastructure layer always wins
+### CHF 500K seed. 18 months of runway.
 
-Every computing paradigm follows the same arc:
+| Use of Funds | Allocation |
+|---|---|
+| Engineering (2-person core team) | 60% |
+| Infrastructure & cloud | 15% |
+| Developer relations & community | 15% |
+| Legal & operations | 10% |
 
-| Era | Primitive | Framework Era | Infrastructure Winner |
-|---|---|---|---|
-| Web | HTTP requests | Rails, Django | Nginx, Apache |
-| Cloud | VMs | CloudFormation | Terraform |
-| Containers | Docker images | Docker Compose | Kubernetes |
-| **Agents** | **LLM calls** | **LangChain, CrewAI** | **?** |
-
-The framework era is loud and crowded. The infrastructure layer is quiet, essential, and durable.
-
-**Auton is the infrastructure layer for autonomous agents.**
-
----
-
-## Appendix: Key Code Metrics
-
-- **~2,500 lines** of core runtime code (Python, async-native)
-- **7 source files:** models, registry, executor, oversight, budget, llm, api
-- **Clean dependency graph:** FastAPI, Anthropic SDK, numpy (for embeddings). No framework dependencies.
-- **State machine:** 8 states, 15 valid transitions, formally enforced
-- **Budget system:** 4-tier escalation with EMA-based cost prediction
-- **API:** 15 endpoints, full OpenAPI spec auto-generated
+**Milestones this buys:**
+1. Production-ready open source runtime (month 3)
+2. Web dashboard + Auton Cloud beta (month 6)
+3. 3 paying enterprise design partners (month 9)
+4. Series A readiness — $1M+ ARR pipeline (month 18)
 
 ---
 
-*"MCP is the nervous system. Auton is the immune system."*
+## Slide 13: Why Now
+
+### Three forces converging.
+
+**1. Agents are getting longer.** Claude can now run for hours. GPT agents persist across sessions. The "set it and forget it" agent is arriving — and it needs management.
+
+**2. Enterprise adoption is accelerating.** 2025 was experimentation. 2026-2027 is production deployment. Companies are hitting the "who watches the agents" wall *right now*.
+
+**3. The protocol window is open.** In infrastructure, the first standard wins (TCP/IP, HTTP, Docker, Kubernetes). The agent lifecycle protocol isn't established yet. **Twelve months from now, it will be.** We intend it to be ours.
+
+---
+
+## Slide 14: The Closing
+
+### Every computing paradigm gets its management layer. Always.
+
+| Era | What runs | What manages it |
+|---|---|---|
+| Servers | Processes | Systemd, Supervisord |
+| Telecom | Calls | Erlang/OTP |
+| Cloud | VMs | Terraform |
+| Containers | Docker images | Kubernetes |
+| **Agents** | **LLM calls** | **❓** |
+
+The agent management layer will be a multi-billion dollar category.
+
+It doesn't exist yet.
+
+**We're building it.**
+
+---
+
+*Auton: Because autonomous doesn't mean unsupervised.*
