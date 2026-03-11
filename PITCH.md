@@ -16,9 +16,9 @@ This isn't hypothetical. This is what happens when you give autonomous software 
 
 ## Slide 2: The Problem
 
-### AI agents are going autonomous. The infrastructure isn't ready.
+### AI agents are going autonomous. The control plane isn't ready.
 
-Companies are deploying AI agents that run for hours, days, or continuously. McKinsey estimates 60% of enterprises will have autonomous agents in production by 2027.
+Companies are deploying AI agents that run for hours, days, or continuously. McKinsey estimates 60% of enterprises will have autonomous agents in production by 2027. The AI agent market is projected to hit $52.6B by 2030 (41% CAGR from $7.8B in 2025).
 
 But today:
 
@@ -33,13 +33,13 @@ Every company deploying agents today is solving these problems from scratch. Bad
 
 ## Slide 3: What We Built
 
-### Auton: The operating system for AI agents.
+### Auton: The control plane for AI agent operations.
 
 Think of it this way:
 
 > **Kubernetes manages containers. Auton manages agents.**
 
-One API to **launch, watch, control, budget, and recover** any AI agent — regardless of which model or framework it uses.
+One API to **launch, watch, control, budget, and recover** any AI agent — regardless of which model, framework, or runtime it uses.
 
 **Launch** agents with one API call. They self-organize into managed hierarchies.
 
@@ -117,15 +117,15 @@ Works from any programming language. No SDK to install. No vendor lock-in.
 
 ## Slide 7: Market Opportunity
 
-### $12B+ market forming right now.
+### $52.6B market by 2030. The control plane doesn't exist yet.
 
-**Container orchestration** (Kubernetes, Docker) went from $0 to $8B in 5 years. Agent orchestration is following the same curve, but faster — because the pain is more immediate and the stakes are higher.
+**AI agent infrastructure** is the fastest-growing category in enterprise software. $7.8B in 2025, projected $52.6B by 2030 at 41% CAGR. The money is real: Sierra AI reached $10B valuation on $100M ARR. Temporal raised $300M at $5B valuation for durable execution alone.
 
-| Segment | Size by 2028 | Our Position |
+| Segment | Size by 2030 | Our Position |
 |---|---|---|
-| Agent infrastructure & orchestration | $12B+ | Core market |
-| AI observability & governance | $6B+ | Adjacent (oversight) |
-| Enterprise AI spend control | $4B+ | Adjacent (budget) |
+| Agent lifecycle & operations | $15B+ | **Core market** |
+| AI observability & governance | $8B+ | Adjacent (oversight) |
+| Enterprise AI spend control | $6B+ | Adjacent (budget) |
 
 **Right now, every enterprise deploying agents is building custom lifecycle management.** They don't want to. They want to buy it.
 
@@ -133,19 +133,28 @@ Works from any programming language. No SDK to install. No vendor lock-in.
 
 ## Slide 8: Competitive Landscape
 
-### Frameworks are building agents. We're managing them.
+### The market is splitting into layers. We own the control layer.
 
-| | **Auton** | LangGraph | CrewAI | AutoGen |
-|---|---|---|---|---|
-| **What it is** | Agent runtime | Workflow framework | Team framework | Chat framework |
-| **Long-running agents** | ✅ Core design | ❌ | ❌ | ❌ |
-| **Real-time oversight** | ✅ | ❌ | ❌ | ❌ |
-| **Smart budgets** | ✅ | ❌ | ❌ | ❌ |
-| **Supervision trees** | ✅ | ❌ | ❌ | ❌ |
-| **Live correction** | ✅ | ❌ | ❌ | ❌ |
-| **Works with any framework** | ✅ | LangChain only | CrewAI only | Microsoft only |
+The agent infrastructure stack is forming clear tiers:
 
-**We're not competing with frameworks. We're the layer underneath them.** LangGraph agents run *inside* Auton. CrewAI teams are managed *by* Auton.
+| Layer | Who | What they do | Funding |
+|---|---|---|---|
+| **Execution** | Temporal | Durable workflows, fault-tolerant task queues | $300M Series D, $5B val |
+| **Compute** | Daytona | Agent-native sandboxed environments | $24M Series A |
+| **Orchestration** | Union.ai (Flyte) | DAG-based workflow pipelines | $38.1M Series A |
+| **Multi-model routing** | orq.ai | Route across 300+ models, 18 providers | €5M seed |
+| **Cloud runtime** | Render | General-purpose AI cloud hosting | $100M Series C, $1.5B val |
+| **Control plane** | **Auton** | Lifecycle, budgets, supervision, oversight | **← You are here** |
+
+**The critical gap:** Everyone builds *how agents run*. Nobody builds *how you control agents while they run*.
+
+- **Temporal** makes agents durable — but doesn't watch what they're doing or control their spending.
+- **Daytona** gives agents sandboxes — but doesn't manage agent hierarchies or enforce budgets.
+- **Union.ai** orchestrates workflows — but can't redirect a running agent or detect drift.
+
+**We're not competing with these companies. We sit on top of them.** Auton manages agents that run *on* Temporal, *inside* Daytona sandboxes, *orchestrated by* Flyte. We're the governance layer.
+
+**Framework-level tools (LangGraph, CrewAI, AutoGen)** are developer libraries, not operational infrastructure. They help you build agents. We help you run them safely at scale.
 
 ---
 
@@ -184,10 +193,13 @@ Works from any programming language. No SDK to install. No vendor lock-in.
 - Checkpoint and fork (pause, resume, branch agents)
 - Open HTTP API — works from any language
 
+**Proven in production:** Lethe, a persistent-memory AI assistant built on Auton's architecture, runs 24/7 handling complex multi-agent tasks. The patterns aren't theoretical — they're battle-tested.
+
 **Next 6 months:**
 - Web dashboard (observe and control agents visually)
 - Persistent storage (currently in-memory)
 - Multi-model support (currently Anthropic; adding OpenAI, Gemini, local)
+- Integration adapters for Temporal, Daytona, Flyte
 - 3 enterprise design partners
 - Auton Cloud beta launch
 
@@ -233,7 +245,7 @@ Works from any programming language. No SDK to install. No vendor lock-in.
 
 ### Three forces converging.
 
-**1. Agents are getting longer.** Claude can now run for hours. GPT agents persist across sessions. The "set it and forget it" agent is arriving — and it needs management.
+**1. The funding wave confirms the market.** Temporal ($5B), Sierra ($10B), Render ($1.5B) — investors are pouring billions into agent infrastructure. But none of them are building the control plane. The gap is wide open.
 
 **2. Enterprise adoption is accelerating.** 2025 was experimentation. 2026-2027 is production deployment. Companies are hitting the "who watches the agents" wall *right now*.
 
@@ -253,7 +265,7 @@ Works from any programming language. No SDK to install. No vendor lock-in.
 | Containers | Docker images | Kubernetes |
 | **Agents** | **LLM calls** | **❓** |
 
-The agent management layer will be a multi-billion dollar category.
+The agent control plane will be a multi-billion dollar category.
 
 It doesn't exist yet.
 
