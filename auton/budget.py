@@ -38,6 +38,7 @@ class BudgetPlanner:
     _call_costs: list[int] = field(default_factory=list)
     _total_spent: int = 0
     _finalize_triggered: bool = False
+    _reserved_for_children: int = 0
 
     # Sliding window size for cost estimation
     WINDOW_SIZE: int = 5
@@ -48,7 +49,17 @@ class BudgetPlanner:
 
     @property
     def remaining(self) -> int:
-        return max(0, self.max_budget - self._total_spent)
+        """Tokens remaining for this agent's own use (excludes child reservations)."""
+        return max(0, self.max_budget - self._total_spent - self._reserved_for_children)
+
+    @property
+    def reserved_for_children(self) -> int:
+        return self._reserved_for_children
+
+    @property
+    def available_for_children(self) -> int:
+        """How many tokens can still be allocated to new children."""
+        return self.remaining
 
     @property
     def pct_used(self) -> float:
@@ -64,6 +75,35 @@ class BudgetPlanner:
     @property
     def finalize_triggered(self) -> bool:
         return self._finalize_triggered
+
+    def reserve_for_child(self, amount: int) -> None:
+        """Reserve tokens from this budget for a child agent.
+
+        Raises ValueError if insufficient budget remains.
+        """
+        if amount <= 0:
+            raise ValueError("Reservation amount must be positive")
+        if amount > self.available_for_children:
+            raise ValueError(
+                f"Cannot reserve {amount:,} tokens — only {self.available_for_children:,} available "
+                f"(budget={self.max_budget:,}, spent={self._total_spent:,}, "
+                f"already_reserved={self._reserved_for_children:,})"
+            )
+        self._reserved_for_children += amount
+        logger.info(
+            f"BudgetPlanner: reserved {amount:,} for child. "
+            f"Total reserved={self._reserved_for_children:,}, remaining={self.remaining:,}"
+        )
+
+    def release_child_reservation(self, amount: int) -> None:
+        """Release tokens back when a child finishes under budget."""
+        released = min(amount, self._reserved_for_children)
+        self._reserved_for_children -= released
+        if released > 0:
+            logger.info(
+                f"BudgetPlanner: released {released:,} from child reservation. "
+                f"Total reserved={self._reserved_for_children:,}, remaining={self.remaining:,}"
+            )
 
     def record_call(self, total_tokens: int) -> None:
         """Record the cost of one API call.
@@ -147,6 +187,8 @@ class BudgetPlanner:
             "total_spent": self._total_spent,
             "max_budget": self.max_budget,
             "remaining": self.remaining,
+            "reserved_for_children": self._reserved_for_children,
+            "available_for_children": self.available_for_children,
             "pct_used": round(self.pct_used, 1),
             "estimated_next_cost": est,
             "finalize_reserve": self.finalize_reserve,

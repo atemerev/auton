@@ -5,42 +5,84 @@ sub-agents. Factory functions return closures bound to a specific agent.
 """
 
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 from auton.models import AgentSpec, SpawnRequest
-from auton.workspace import list_workspace_files
+from auton.tools.workspace_tools import _safe_resolve
+from auton.workspace import get_workspace_path, list_workspace_files
 
 
-def make_spawn_child(agent_id: str, agent_path: str, registry):
-    """Create a spawn_child tool bound to this agent as parent."""
+def make_spawn_child(agent_id: str, agent_path: str, registry, budget_planner=None):
+    """Create a spawn_child tool bound to this agent as parent.
+
+    If budget_planner is provided, child token budgets are reserved from
+    the parent's budget. The parent cannot allocate more tokens to children
+    than it has remaining.
+    """
+
+    # Default tools for children when none specified
+    _DEFAULT_CHILD_TOOLS = [
+        "web_search", "fetch_webpage",
+        "write_file", "read_file", "list_files",
+        "check_budget", "finish",
+    ]
 
     def spawn_child(
         child_id: str,
         name: str,
         system_prompt: str,
         goal: str,
-        tools: str = "[]",
+        tools: str = "",
         model: str = "openrouter/anthropic/claude-sonnet-4-6",
+        max_tokens: int | None = None,
     ) -> str:
         """Spawn a child agent under this agent.
 
         The child runs autonomously with its own LLM loop. Use list_children
         and check_child_status to monitor progress.
 
+        When max_tokens is specified, that amount is reserved from your
+        budget. Use check_budget to see how much you can allocate.
+
         Args:
             child_id: Unique ID for the child (e.g. "worker-1", "researcher")
             name: Human-readable name for the child
             system_prompt: Full system prompt defining the child's behavior
             goal: The specific objective for the child
-            tools: JSON array of tool names (e.g. '["shell_exec", "write_file", "read_file"]')
+            tools: JSON array of tool names, or omit for defaults (web_search, fetch_webpage, write_file, read_file, list_files, check_budget, finish)
             model: LLM model to use (default: claude-sonnet)
+            max_tokens: Token budget for the child (reserved from your budget)
 
         Returns:
             Confirmation with child path and ID, or error
         """
         try:
-            tools_list = json.loads(tools) if isinstance(tools, str) else tools
-        except json.JSONDecodeError:
-            return json.dumps({"status": "error", "message": "Invalid tools JSON array"})
+            if tools and isinstance(tools, str):
+                tools_list = json.loads(tools)
+            elif isinstance(tools, list) and tools:
+                tools_list = tools
+            else:
+                tools_list = list(_DEFAULT_CHILD_TOOLS)
+            if not isinstance(tools_list, list):
+                tools_list = list(_DEFAULT_CHILD_TOOLS)
+        except (json.JSONDecodeError, TypeError):
+            tools_list = list(_DEFAULT_CHILD_TOOLS)
+
+        # Coerce max_tokens to int (LLMs sometimes send it as a string)
+        if max_tokens is not None:
+            try:
+                max_tokens = int(max_tokens)
+            except (ValueError, TypeError):
+                return json.dumps({"status": "error", "message": f"Invalid max_tokens: {max_tokens}"})
+
+        # Reserve budget from parent if child has a token budget
+        if max_tokens and budget_planner:
+            try:
+                budget_planner.reserve_for_child(max_tokens)
+            except ValueError as e:
+                return json.dumps({"status": "error", "message": str(e)})
 
         try:
             spec = AgentSpec(
@@ -49,8 +91,12 @@ def make_spawn_child(agent_id: str, agent_path: str, registry):
                 goal=goal,
                 tools=tools_list,
                 model=model,
+                max_tokens=max_tokens,
             )
         except Exception as e:
+            # Roll back reservation on spec error
+            if max_tokens and budget_planner:
+                budget_planner.release_child_reservation(max_tokens)
             return json.dumps({"status": "error", "message": f"Invalid spec: {e}"})
 
         req = SpawnRequest(id=child_id, spec=spec)
@@ -59,13 +105,20 @@ def make_spawn_child(agent_id: str, agent_path: str, registry):
             # Publish spawn event
             if registry.publish_event:
                 registry.publish_event(node.path, {"type": "spawned", "path": node.path})
-            return json.dumps({
+            result = {
                 "status": "OK",
                 "child_id": node.id,
                 "child_path": node.path,
                 "state": node.state.value,
-            })
+            }
+            if max_tokens and budget_planner:
+                result["budget_reserved"] = max_tokens
+                result["parent_remaining"] = budget_planner.remaining
+            return json.dumps(result)
         except Exception as e:
+            # Roll back reservation on spawn error
+            if max_tokens and budget_planner:
+                budget_planner.release_child_reservation(max_tokens)
             return json.dumps({"status": "error", "message": str(e)})
 
     return spawn_child
@@ -178,3 +231,49 @@ def make_check_child_status(agent_id: str, registry):
         return json.dumps(result)
 
     return check_child_status
+
+
+def make_read_child_file(agent_id: str, registry):
+    """Create a tool that reads a file from a child agent's workspace."""
+
+    def read_child_file(child_path: str, file_path: str) -> str:
+        """Read a file from a child agent's workspace.
+
+        Use this after a child agent finishes to retrieve its output files
+        (e.g. dossier.md, report.md).
+
+        Args:
+            child_path: Full path of the child agent (e.g. "coordinator/worker-1")
+            file_path: Relative path within the child's workspace (e.g. "dossier.md")
+
+        Returns:
+            JSON with file content or error
+        """
+        node = registry.resolve(child_path)
+        if node is None:
+            return json.dumps({"status": "error", "message": f"Agent not found: {child_path}"})
+
+        child_ws = get_workspace_path(node.id)
+        target = _safe_resolve(child_ws, file_path)
+        if target is None:
+            return json.dumps({"status": "error", "message": "Path escapes workspace boundary"})
+        if not target.exists():
+            return json.dumps({"status": "error", "message": f"File not found: {file_path}"})
+
+        try:
+            content = target.read_text()
+        except UnicodeDecodeError:
+            return json.dumps({"status": "error", "message": f"Binary file: {file_path}"})
+
+        if len(content) > 100_000:
+            content = content[:100_000] + "\n\n[... truncated at 100K chars ...]"
+
+        return json.dumps({
+            "status": "OK",
+            "child": child_path,
+            "path": file_path,
+            "size": len(content),
+            "content": content,
+        })
+
+    return read_child_file

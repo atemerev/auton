@@ -25,6 +25,7 @@ from auton.tools.coordination import (
     make_check_child_status,
     make_list_children,
     make_message_child,
+    make_read_child_file,
     make_spawn_child,
 )
 from auton.workspace import ensure_workspace
@@ -48,7 +49,7 @@ CLOSURE_TOOLS = {
     # Artifact sharing
     "pass_artifact",
     # Agent coordination
-    "spawn_child", "message_agent", "list_children", "check_child_status",
+    "spawn_child", "message_agent", "list_children", "check_child_status", "read_child_file",
     # Control
     "finish", "check_budget",
 }
@@ -91,6 +92,8 @@ def make_check_budget(node: AgentNode, planner: BudgetPlanner | None = None):
             result["estimated_next_cost"] = snap["estimated_next_cost"]
             result["estimated_calls_remaining"] = snap["estimated_calls_remaining"]
             result["finalize_imminent"] = snap["finalize_triggered"]
+            result["reserved_for_children"] = snap["reserved_for_children"]
+            result["available_for_children"] = snap["available_for_children"]
 
         # Add actionable advice
         if max_tokens:
@@ -302,10 +305,13 @@ class AgentExecutor:
         if planner and "write_file" in requested_tools:
             output_tools = requested_tools & SAVE_GATE_TOOLS
 
-        # Create LLM client
+        # Create LLM client — agents with write_file need higher output limits
+        # to write complete files in tool call arguments
+        max_out = 8192 if "write_file" in requested_tools else 4096
         llm = LLMClient(
             model=node.spec.model,
             system_prompt=system_prompt,
+            max_output_tokens=max_out,
             budget_check=_check_budget,
             on_event=_on_llm_event,
             budget_planner=planner,
@@ -347,7 +353,7 @@ class AgentExecutor:
 
         # Agent coordination tools (need registry)
         if "spawn_child" in requested_tools and self.registry:
-            fn = make_spawn_child(node.id, node.path, self.registry)
+            fn = make_spawn_child(node.id, node.path, self.registry, budget_planner=planner)
             llm.add_tool(fn, function_to_schema(fn))
         if "message_agent" in requested_tools and self.registry:
             fn = make_message_child(node.id, self.registry)
@@ -357,6 +363,9 @@ class AgentExecutor:
             llm.add_tool(fn, function_to_schema(fn))
         if "check_child_status" in requested_tools and self.registry:
             fn = make_check_child_status(node.id, self.registry)
+            llm.add_tool(fn, function_to_schema(fn))
+        if "read_child_file" in requested_tools and self.registry:
+            fn = make_read_child_file(node.id, self.registry)
             llm.add_tool(fn, function_to_schema(fn))
 
         # Generic finish tool — any agent can signal completion
@@ -432,13 +441,25 @@ class AgentExecutor:
 
             budget_pct = self._get_budget_pct()
 
-            # Budget enforcement — planner handles graceful finalize inside chat(),
-            # this is the outer safety net at the executor level.
+            # Budget enforcement — if budget >= 95%, give the agent one final
+            # chance to save its work before stopping.
             if budget_pct is not None and budget_pct >= BUDGET_FINAL_PCT:
                 logger.warning(
-                    f"Agent {node.id} budget at {budget_pct:.0f}% — stopping. "
+                    f"Agent {node.id} budget at {budget_pct:.0f}% — final save. "
                     f"({node.health.tokens_total:,} tokens)"
                 )
+                # Give agent one last chance to write output files
+                try:
+                    save_msg = (
+                        "[⚠️ BUDGET EXHAUSTED. This is your FINAL turn. "
+                        "Write your findings to dossier.md NOW using write_file, "
+                        "then call finish. Do not do any more research.]"
+                    )
+                    await llm.chat(save_msg)
+                    node.conversation = llm.messages[-200:]
+                    node.health.tokens_total = llm.usage.total_tokens
+                except Exception as e:
+                    logger.warning(f"Agent {node.id} final save failed: {e}")
                 break
 
             # Runtime budget check

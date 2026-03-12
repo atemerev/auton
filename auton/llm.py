@@ -19,6 +19,43 @@ from auton.budget import BudgetPlanner
 
 logger = logging.getLogger(__name__)
 
+
+def _repair_json_args(raw: str) -> dict | None:
+    """Attempt to repair malformed JSON tool arguments from LLMs.
+
+    Common issue: LLMs emit literal newlines inside JSON string values
+    (e.g., in write_file content). This replaces unescaped control chars
+    and retries parsing.
+    """
+    import re
+    # Replace literal control characters inside strings with escaped versions
+    # This handles the most common case: unescaped newlines in string values
+    repaired = re.sub(r'[\x00-\x1f]', lambda m: {
+        '\n': '\\n', '\r': '\\r', '\t': '\\t',
+    }.get(m.group(), ''), raw)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+
+    # Try extracting JSON object if surrounded by extra text
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            # Try the control-char replacement on the extracted object
+            repaired = re.sub(r'[\x00-\x1f]', lambda m: {
+                '\n': '\\n', '\r': '\\r', '\t': '\\t',
+            }.get(m.group(), ''), match.group())
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+
+    return None
+
+
 # Circuit breaker constants (from Lethe)
 MAX_TOOL_ERRORS = 8
 MAX_REPEATED_TOOL_CALLS = 4
@@ -140,7 +177,12 @@ class LLMClient:
                     })
                     # Activate write gate so the agent can save but not search
                     self._write_gate_active = True
+                    # Temporarily boost max_output_tokens for finalize — the agent
+                    # needs to write potentially large files in tool call arguments
+                    saved_max = self.max_output_tokens
+                    self.max_output_tokens = max(saved_max, 16384)
                     finalize_resp = await self._call_api()
+                    self.max_output_tokens = saved_max
                     fin_msg = finalize_resp["choices"][0]["message"]
                     fin_content = fin_msg.get("content") or ""
                     fin_tool_calls = fin_msg.get("tool_calls")
@@ -164,14 +206,18 @@ class LLMClient:
                             try:
                                 t_args = json.loads(tc["function"]["arguments"])
                             except json.JSONDecodeError as e:
-                                logger.error(f"Finalize tool {t_name} malformed args: {e}")
-                                self.messages.append({
-                                    "role": "tool",
-                                    "content": f"Error: malformed arguments - {e}",
-                                    "tool_call_id": t_id,
-                                    "name": t_name,
-                                })
-                                continue
+                                raw_args = tc["function"]["arguments"]
+                                t_args = _repair_json_args(raw_args)
+                                if t_args is None:
+                                    logger.error(f"Finalize tool {t_name} malformed args: {e}\n  raw: {raw_args[:500]}")
+                                    self.messages.append({
+                                        "role": "tool",
+                                        "content": f"Error: malformed arguments - {e}",
+                                        "tool_call_id": t_id,
+                                        "name": t_name,
+                                    })
+                                    continue
+                                logger.info(f"Repaired malformed JSON for finalize tool {t_name}")
                             handler = self.get_tool(t_name)
                             if handler:
                                 try:
@@ -293,15 +339,19 @@ class LLMClient:
                         try:
                             tool_args = json.loads(tool_call["function"]["arguments"])
                         except json.JSONDecodeError as e:
-                            logger.error(f"Tool {tool_name} malformed args: {e}")
-                            total_tool_errors += 1
-                            self.messages.append({
-                                "role": "tool",
-                                "content": f"Error: malformed arguments - {e}",
-                                "tool_call_id": tool_id,
-                                "name": tool_name,
-                            })
-                            continue
+                            raw_args = tool_call["function"]["arguments"]
+                            tool_args = _repair_json_args(raw_args)
+                            if tool_args is None:
+                                logger.error(f"Tool {tool_name} malformed args: {e}\n  raw: {raw_args[:500]}")
+                                total_tool_errors += 1
+                                self.messages.append({
+                                    "role": "tool",
+                                    "content": f"Error: malformed arguments - {e}",
+                                    "tool_call_id": tool_id,
+                                    "name": tool_name,
+                                })
+                                continue
+                            logger.info(f"Repaired malformed JSON for tool {tool_name}")
 
                         # Repeated call detection
                         signature = f"{tool_name}:{json.dumps(tool_args, sort_keys=True)}"

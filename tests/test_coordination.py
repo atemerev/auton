@@ -13,9 +13,11 @@ from auton.tools.coordination import (
     make_check_child_status,
     make_list_children,
     make_message_child,
+    make_read_child_file,
     make_spawn_child,
 )
-from auton.workspace import cleanup_workspace
+from auton.budget import BudgetPlanner
+from auton.workspace import cleanup_workspace, ensure_workspace, get_workspace_path
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +266,143 @@ def test_check_child_not_found():
     check_fn = make_check_child_status("test-parent", registry)
     result = json.loads(check_fn("nonexistent"))
     assert result["status"] == "error"
+
+
+def test_read_child_file():
+    """read_child_file reads a file from a child agent's workspace."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    parent_spec = AgentSpec(name="Parent", system_prompt="Coord.", goal="Manage")
+    _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+
+    child_spec = AgentSpec(name="Worker", system_prompt="Worker.", goal="Work")
+    _spawn_no_executor(SpawnRequest(id="child-1", spec=child_spec), parent_path="test-parent")
+
+    # Write a file to child's workspace
+    ensure_workspace("child-1")
+    ws = get_workspace_path("child-1")
+    (ws / "dossier.md").write_text("# Dossier\nSome findings here.")
+
+    read_fn = make_read_child_file("test-parent", registry)
+    result = json.loads(read_fn("test-parent/child-1", "dossier.md"))
+    assert result["status"] == "OK"
+    assert "# Dossier" in result["content"]
+    assert result["child"] == "test-parent/child-1"
+
+
+def test_read_child_file_not_found():
+    """read_child_file returns error for missing file or agent."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    # Nonexistent agent
+    read_fn = make_read_child_file("test-parent", registry)
+    result = json.loads(read_fn("nonexistent", "dossier.md"))
+    assert result["status"] == "error"
+
+    # Existing agent, missing file
+    parent_spec = AgentSpec(name="Parent", system_prompt="Coord.", goal="Manage")
+    _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+    child_spec = AgentSpec(name="Worker", system_prompt="Worker.", goal="Work")
+    _spawn_no_executor(SpawnRequest(id="child-1", spec=child_spec), parent_path="test-parent")
+    ensure_workspace("child-1")
+
+    result = json.loads(read_fn("test-parent/child-1", "nonexistent.md"))
+    assert result["status"] == "error"
+    assert "not found" in result["message"].lower()
+
+
+def test_spawn_child_reserves_budget():
+    """spawn_child deducts max_tokens from parent's budget planner."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    parent_spec = AgentSpec(
+        name="Parent",
+        system_prompt="Coordinator.",
+        goal="Manage",
+        max_tokens=300_000,
+    )
+    _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+
+    planner = BudgetPlanner(max_budget=300_000)
+    planner.record_call(10_000)  # simulate some initial spending
+
+    with patch.object(registry, '_start_executor'):
+        spawn_fn = make_spawn_child("test-parent", "test-parent", registry, budget_planner=planner)
+
+        result = json.loads(spawn_fn(
+            child_id="child-1",
+            name="Worker 1",
+            system_prompt="Worker.",
+            goal="Do work",
+            max_tokens=50_000,
+        ))
+
+    assert result["status"] == "OK"
+    assert result["budget_reserved"] == 50_000
+    assert planner.reserved_for_children == 50_000
+    assert planner.remaining == 240_000  # 300K - 10K spent - 50K reserved
+
+
+def test_spawn_child_budget_exceeded():
+    """spawn_child rejects child if budget insufficient."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    parent_spec = AgentSpec(
+        name="Parent",
+        system_prompt="Coordinator.",
+        goal="Manage",
+    )
+    _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+
+    planner = BudgetPlanner(max_budget=100_000)
+    planner.record_call(80_000)  # only 20K remaining
+
+    with patch.object(registry, '_start_executor'):
+        spawn_fn = make_spawn_child("test-parent", "test-parent", registry, budget_planner=planner)
+
+        result = json.loads(spawn_fn(
+            child_id="child-1",
+            name="Worker 1",
+            system_prompt="Worker.",
+            goal="Do work",
+            max_tokens=50_000,  # needs 50K but only 20K available
+        ))
+
+    assert result["status"] == "error"
+    assert "Cannot reserve" in result["message"]
+    # Reservation should not have been applied
+    assert planner.reserved_for_children == 0
+
+
+def test_spawn_child_no_planner_no_reservation():
+    """spawn_child without planner works as before (no reservation)."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    parent_spec = AgentSpec(
+        name="Parent",
+        system_prompt="Coordinator.",
+        goal="Manage",
+    )
+    _spawn_no_executor(SpawnRequest(id="test-parent", spec=parent_spec))
+
+    with patch.object(registry, '_start_executor'):
+        spawn_fn = make_spawn_child("test-parent", "test-parent", registry)  # no planner
+
+        result = json.loads(spawn_fn(
+            child_id="child-1",
+            name="Worker 1",
+            system_prompt="Worker.",
+            goal="Do work",
+            max_tokens=50_000,
+        ))
+
+    assert result["status"] == "OK"
+    assert "budget_reserved" not in result
 
 
 # ---------------------------------------------------------------------------

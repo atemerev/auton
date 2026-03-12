@@ -16,7 +16,7 @@ from litellm import acompletion
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_JUDGE_MODEL = "openrouter/anthropic/claude-haiku-4-5-20251001"
+DEFAULT_JUDGE_MODEL = "openrouter/anthropic/claude-haiku-4.5"
 
 # How many recent messages to include in the activity summary
 ACTIVITY_WINDOW = 15

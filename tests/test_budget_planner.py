@@ -218,6 +218,95 @@ def test_growing_conversation_triggers_finalize():
     assert p.pct_used < 80
 
 
+# ---------------------------------------------------------------------------
+# Child budget reservation
+# ---------------------------------------------------------------------------
+
+
+def test_reserve_for_child():
+    p = BudgetPlanner(max_budget=300_000)
+    p.record_call(10_000)
+    assert p.remaining == 290_000
+
+    p.reserve_for_child(50_000)
+    assert p.reserved_for_children == 50_000
+    assert p.remaining == 240_000  # 300K - 10K spent - 50K reserved
+    assert p.available_for_children == 240_000
+
+
+def test_reserve_multiple_children():
+    p = BudgetPlanner(max_budget=300_000)
+    p.reserve_for_child(50_000)
+    p.reserve_for_child(50_000)
+    p.reserve_for_child(50_000)
+    assert p.reserved_for_children == 150_000
+    assert p.remaining == 150_000
+
+
+def test_reserve_exceeds_available():
+    p = BudgetPlanner(max_budget=100_000)
+    p.record_call(60_000)
+    # remaining = 40K
+    import pytest
+    with pytest.raises(ValueError, match="Cannot reserve"):
+        p.reserve_for_child(50_000)
+    # Reservation should not have been applied
+    assert p.reserved_for_children == 0
+
+
+def test_release_child_reservation():
+    p = BudgetPlanner(max_budget=300_000)
+    p.reserve_for_child(80_000)
+    assert p.remaining == 220_000
+
+    p.release_child_reservation(80_000)
+    assert p.reserved_for_children == 0
+    assert p.remaining == 300_000
+
+
+def test_release_partial():
+    """Release less than total reservation."""
+    p = BudgetPlanner(max_budget=300_000)
+    p.reserve_for_child(50_000)
+    p.reserve_for_child(50_000)
+    p.release_child_reservation(30_000)
+    assert p.reserved_for_children == 70_000
+
+
+def test_release_more_than_reserved():
+    """Release clamped to actual reserved amount."""
+    p = BudgetPlanner(max_budget=300_000)
+    p.reserve_for_child(20_000)
+    p.release_child_reservation(100_000)
+    assert p.reserved_for_children == 0
+
+
+def test_reservation_affects_finalize():
+    """Reservations reduce remaining, which should trigger finalize sooner."""
+    p = BudgetPlanner(max_budget=100_000)
+    p.record_call(10_000)
+    p.record_call(10_000)
+    # remaining = 80K, no finalize yet
+    assert p.should_finalize() is False
+
+    # Reserve 70K for children
+    p.reserve_for_child(70_000)
+    # remaining = 10K now
+    # est_next = max(10K, 10K) * 1.2 = 12K
+    # 10K < 12K + 10K => should finalize
+    assert p.should_finalize() is True
+
+
+def test_snapshot_includes_reservations():
+    p = BudgetPlanner(max_budget=300_000)
+    p.record_call(10_000)
+    p.reserve_for_child(50_000)
+    snap = p.snapshot()
+    assert snap["reserved_for_children"] == 50_000
+    assert snap["available_for_children"] == 240_000
+    assert snap["remaining"] == 240_000
+
+
 def test_small_uniform_calls_no_early_finalize():
     """Many small calls should use most of the budget."""
     p = BudgetPlanner(max_budget=100_000)

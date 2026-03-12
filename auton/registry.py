@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any, Callable
@@ -27,6 +28,7 @@ class AgentRegistry:
         self._executors: dict[str, Any] = {}  # path -> AgentExecutor
         self.publish_event: Callable | None = None
         self.db = None
+        self._loop: asyncio.AbstractEventLoop | None = None  # set on first spawn from async context
 
     # ------------------------------------------------------------------
     # Path resolution
@@ -272,12 +274,31 @@ class AgentRegistry:
     # ------------------------------------------------------------------
 
     def _start_executor(self, node: AgentNode) -> None:
-        """Create and start an executor for an agent."""
+        """Create and start an executor for an agent.
+
+        Thread-safe: if called from a thread pool (e.g. run_in_executor
+        when sync tool functions are executed), schedules the asyncio.Task
+        creation on the main event loop thread via call_soon_threadsafe.
+        """
         from auton.executor import AgentExecutor
 
         executor = AgentExecutor(node, self.publish_event, self.db, registry=self)
         self._executors[node.path] = executor
-        executor.start()
+
+        # Capture the event loop on first use from the async context
+        try:
+            running = asyncio.get_running_loop()
+            self._loop = running
+            executor.start()
+        except RuntimeError:
+            # No running loop in this thread — we're in a thread pool.
+            # Use the stored loop reference to schedule task creation.
+            if self._loop:
+                self._loop.call_soon_threadsafe(executor.start)
+            else:
+                logger.error(f"Cannot start executor for {node.path}: no event loop available")
+                return
+
         logger.info(f"Started executor for {node.path}")
 
     def _stop_executor(self, path: str) -> None:
