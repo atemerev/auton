@@ -17,3 +17,6 @@ wheels/
 
 # Agent workspaces
 workspaces/
+
+# macOS
+.DS_Store
