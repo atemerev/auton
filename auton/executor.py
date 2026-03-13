@@ -448,16 +448,64 @@ class AgentExecutor:
                     f"Agent {node.id} budget at {budget_pct:.0f}% — final save. "
                     f"({node.health.tokens_total:,} tokens)"
                 )
-                # Give agent one last chance to write output files
+                # Direct final-save API call with trimmed context.
+                # Uses a separate acompletion call to avoid chat() loop issues.
                 try:
-                    save_msg = (
-                        "[⚠️ BUDGET EXHAUSTED. This is your FINAL turn. "
-                        "Write your findings to dossier.md NOW using write_file, "
-                        "then call finish. Do not do any more research.]"
-                    )
-                    await llm.chat(save_msg)
-                    node.conversation = llm.messages[-200:]
-                    node.health.tokens_total = llm.usage.total_tokens
+                    from litellm import acompletion as _acompletion
+
+                    # Extract last few assistant messages as a summary of work done
+                    assistant_msgs = [
+                        m["content"][:500] for m in llm.messages
+                        if m.get("role") == "assistant" and m.get("content")
+                    ]
+                    work_summary = "\n".join(assistant_msgs[-3:]) if assistant_msgs else "(no findings yet)"
+
+                    save_messages = [
+                        {"role": "system", "content": (
+                            "You are a research agent. Your budget is exhausted. "
+                            "You MUST call the write_file tool to save your findings to dossier.md. "
+                            "Write a comprehensive dossier based on what you found."
+                        )},
+                        {"role": "user", "content": (
+                            f"Your original goal: {node.spec.goal}\n\n"
+                            f"Your recent findings:\n{work_summary}\n\n"
+                            "WRITE ALL YOUR FINDINGS to dossier.md using the write_file tool NOW."
+                        )},
+                    ]
+
+                    # Only offer write_file tool
+                    write_file_schema = None
+                    for name, (_, schema) in llm._tools.items():
+                        if name == "write_file":
+                            write_file_schema = {"type": "function", "function": schema}
+                            break
+
+                    if write_file_schema:
+                        save_resp = await _acompletion(
+                            model=node.spec.model,
+                            messages=save_messages,
+                            tools=[write_file_schema],
+                            max_tokens=16384,
+                            temperature=0.3,
+                        )
+                        save_msg = save_resp.choices[0].message
+                        if save_msg.tool_calls:
+                            for tc in save_msg.tool_calls:
+                                if tc.function.name == "write_file":
+                                    try:
+                                        args = json.loads(tc.function.arguments)
+                                    except json.JSONDecodeError:
+                                        from auton.llm import _repair_json_args
+                                        args = _repair_json_args(tc.function.arguments)
+                                    if args:
+                                        handler = llm._tools.get("write_file", (None,))[0]
+                                        if handler:
+                                            result = handler(**args)
+                                            logger.warning(f"Agent {node.id} final save wrote: {args.get('path', '?')}")
+                        else:
+                            logger.warning(f"Agent {node.id} final save: LLM responded with text, no write_file call")
+                    else:
+                        logger.warning(f"Agent {node.id} final save: no write_file tool available")
                 except Exception as e:
                     logger.warning(f"Agent {node.id} final save failed: {e}")
                 break

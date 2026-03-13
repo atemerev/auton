@@ -361,6 +361,8 @@ class LLMClient:
                             repeated_tool_call_streak = 1
                             last_tool_signature = signature
 
+                        if tool_name == "write_file":
+                            logger.warning(f"write_file: path={tool_args.get('path', '?')}, content_len={len(tool_args.get('content', ''))}")
                         logger.info(f"Tool: {tool_name}({list(tool_args.keys())})")
 
                         # Emit tool_call event
