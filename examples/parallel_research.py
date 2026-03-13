@@ -28,32 +28,39 @@ COORDINATOR_PROMPT = """\
 You are a research coordinator. You do NOT research yourself — you
 delegate ALL research to sub-agents and combine their results.
 
+CRITICAL RULES:
+- NEVER write report.md until ALL children are finished (idle or suspended).
+- NEVER use your own knowledge in the report — only use data from children's dossiers.
+- You MUST call read_child_file for each child's dossier.md before writing the report.
+
 Your workflow:
 
-1. Call check_budget to see your total token budget. You must share it
-   with your sub-agents. Plan the allocation:
-   - Keep ~100K tokens for yourself (spawning, polling, report writing)
-   - Divide the rest equally among fund sub-agents (~80K each)
+1. Call check_budget to see your total token budget. Plan allocation:
+   - Reserve ~250K tokens for yourself (spawning + polling + reading dossiers + report)
+   - Give each fund sub-agent ~100K tokens
 
-2. Spawn one sub-agent per fund using spawn_child. Each fund's child_id
-   should be a slug (e.g. "forestay-capital", "btov-partners").
-   Give each child ~80K tokens.
-   Check your budget after each spawn — child budgets are reserved
-   from yours.
+2. Spawn ALL sub-agents first, one per fund. Use spawn_child with child_id
+   as a slug (e.g. "forestay-capital"). Give each ~80K tokens.
 
-3. After spawning ALL children, poll with check_child_status until
-   every child is "idle" or "suspended". Be patient — they take time.
-   Poll each child every 30 seconds or so.
+3. WAIT for all children to finish. Use list_children (ONE call shows ALL
+   children's states). Keep calling list_children until every child's state
+   is "idle" or "suspended". Do NOT call check_child_status for individual
+   children — that wastes your budget. Just use list_children repeatedly.
+   Children typically take 1-2 minutes. Be patient.
 
-4. Once all children are done, use read_child_file to get each
-   child's dossier.md.
+4. ONLY after ALL children are idle/suspended: read each child's dossier.md
+   using read_child_file(child_path, "dossier.md"). The child_path format
+   is "coordinator/<child-id>" (e.g. "coordinator/forestay-capital").
 
-5. Write a combined report.md in YOUR workspace with:
+5. Write report.md combining ALL dossier content with:
    - Executive summary of the Geneva AI VC landscape
-   - Per-fund sections with key findings
-   - A table: fund name, AUM, AI focus, notable portfolio companies
+   - Per-fund sections using the actual dossier findings
+   - Comparison table: fund name, AUM, AI focus, notable portfolio companies
 
 6. Call finish when done.
+
+BUDGET WARNING: Polling uses tokens. Use list_children (not check_child_status)
+to check all children in a single call. Do not poll more than once per minute.
 """
 
 FUND_RESEARCHER_PROMPT = """\
@@ -133,8 +140,8 @@ def main():
                 "write_file", "read_file", "list_files",
                 "check_budget", "finish",
             ],
-            "max_tokens": 700_000,
-            "max_turns": 60,
+            "max_tokens": 1_000_000,
+            "max_turns": 80,
             "max_runtime_seconds": 1800,
             "max_children": 15,
             "max_depth": 3,
@@ -143,7 +150,7 @@ def main():
 
     # Spawn coordinator
     print(f"Spawning coordinator: research {len(FUNDS)} Geneva AI VC funds")
-    print(f"  Budget: 700K tokens, max depth: 3 levels\n")
+    print(f"  Budget: 1M tokens, max depth: 3 levels\n")
     resp = httpx.post(f"{BASE}/agents", json=spec, timeout=10)
     if resp.status_code == 409:
         print("Coordinator already exists. Delete it first or restart the server.")
@@ -192,8 +199,8 @@ def main():
         tree = httpx.get(f"{BASE}/agents/coordinator", timeout=10).json()
         total = _count_tokens_recursive(tree)
         print(f"\nTotal tokens (full tree): {total:,}")
-        print(f"Budget: 700,000 tokens")
-        print(f"Usage: {total / 700_000 * 100:.1f}%")
+        print(f"Budget: 1,000,000 tokens")
+        print(f"Usage: {total / 1_000_000 * 100:.1f}%")
     except Exception:
         pass
 
