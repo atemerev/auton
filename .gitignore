@@ -20,3 +20,4 @@ workspaces/
 
 # macOS
 .DS_Store
+.sessions.json

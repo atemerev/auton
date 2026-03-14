@@ -112,6 +112,16 @@ async def lifespan(app: FastAPI):
     scheduler = Scheduler(registry, _publish_event, db)
     scheduler.start()
 
+    # Initialize dashboard UI if dependencies available
+    try:
+        from .dashboard.main import init_dashboard
+        init_dashboard(app)
+        logger.info("Dashboard UI available at /")
+    except ImportError as e:
+        logger.info("Dashboard not available (missing deps): %s", e)
+    except Exception as e:
+        logger.warning("Dashboard init failed: %s", e)
+
     yield
 
     # Cleanup

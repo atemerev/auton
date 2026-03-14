@@ -18,7 +18,7 @@ Every team deploying agents in production has a story like this. Most have sever
 
 ### AI agents are going autonomous. The control plane isn't ready.
 
-Companies are deploying AI agents that run for hours, days, or continuously. McKinsey estimates 60% of enterprises will have autonomous agents in production by 2027. The AI agent market is projected to hit $52.6B by 2030 (41% CAGR from $7.8B in 2025).
+Companies are deploying AI agents that run for hours, days, or continuously. The AI agent market is projected to hit $52B by 2030 (41% CAGR from ~$8B in 2025). AI agents now capture ~33% of total global VC funding. Gartner predicts 40%+ of enterprise AI agent projects will be scrapped without proper governance infrastructure.
 
 But today:
 
@@ -27,7 +27,7 @@ But today:
 - **No management layer.** Agents that create other agents produce invisible sprawl. One goes wrong, they all go wrong.
 - **No correction without killing.** If an agent drifts off course, your only option is to restart from zero.
 
-Every company deploying agents today is solving these problems from scratch. Badly.
+Enterprises deploy agents but monitor them with "fragmented point solutions built for simpler, deterministic use cases" (RPS Ventures, 2026). Every company deploying agents today is solving these problems from scratch. Badly.
 
 ---
 
@@ -117,9 +117,9 @@ Works from any programming language. No SDK to install. No vendor lock-in.
 
 ## Slide 7: Market Opportunity
 
-### $52.6B market by 2030. The control plane doesn't exist yet.
+### $52B market by 2030. The control plane is up for grabs.
 
-**AI agent infrastructure** is the fastest-growing category in enterprise software. $7.8B in 2025, projected $52.6B by 2030 at 41% CAGR. The money is real: Sierra AI reached $10B valuation on $100M ARR. Temporal raised $300M at $5B valuation for durable execution alone.
+**AI agent infrastructure** is the fastest-growing category in enterprise software. ~$8B in 2025, projected $52B by 2030 at 41% CAGR. AI agents capture ~33% of total global VC. The money is real: Sierra AI reached $10B valuation, Temporal raised $300M at $5B for durable execution alone, and even the closest governance competitor (Fiddler) has raised $100M on 4x revenue growth.
 
 | Segment | Size by 2030 | Our Position |
 |---|---|---|
@@ -133,28 +133,30 @@ Works from any programming language. No SDK to install. No vendor lock-in.
 
 ## Slide 8: Competitive Landscape
 
-### The market is splitting into layers. We own the control layer.
+### The category is forming. Nobody has the full stack yet.
 
-The agent infrastructure stack is forming clear tiers:
+**Direct competitors — agent governance startups:**
 
-| Layer | Who | What they do | Funding |
+| Company | Focus | Funding | Gap vs. Auton |
 |---|---|---|---|
-| **Execution** | Temporal | Durable workflows, fault-tolerant task queues | $300M Series D, $5B val |
-| **Compute** | Daytona | Agent-native sandboxed environments | $24M Series A |
-| **Orchestration** | Union.ai (Flyte) | DAG-based workflow pipelines | $38.1M Series A |
-| **Multi-model routing** | orq.ai | Route across 300+ models, 18 providers | €5M seed |
-| **Cloud runtime** | Render | General-purpose AI cloud hosting | $100M Series C, $1.5B val |
-| **Control plane** | **Auton** | Lifecycle, budgets, supervision, oversight | **← You are here** |
+| **Fiddler AI** | ML observability → agent monitoring | $100M (Series C) | Reactive monitoring, not proactive control. No budget enforcement or supervision trees. Enterprise-only. |
+| **Overmind** | Agent drift detection | £2M seed | Drift detection only — no lifecycle management, no budgets. Single capability. |
+| **Swept AI** | Pre-deployment agent testing | $1.4M pre-seed | Evaluation/certification, not runtime governance. Complementary, not competitive. |
+| **Prefactor** | Agent visibility & audit trails | ~$100K pre-seed | Uses "Agent Control Plane" positioning but minimal product. Validates our category. |
 
-**The critical gap:** Everyone builds *how agents run*. Nobody builds *how you control agents while they run*.
+Fiddler is the best-funded direct competitor ($100M, ranked #1 in AI Agent Security by CB Insights). But Fiddler's heritage is reactive ML monitoring — observing after the fact. Auton's control plane is proactive and structural: enforcing budgets, managing lifecycles, and providing supervision trees *before and during* execution, not just after.
 
-- **Temporal** makes agents durable — but doesn't watch what they're doing or control their spending.
-- **Daytona** gives agents sandboxes — but doesn't manage agent hierarchies or enforce budgets.
-- **Union.ai** orchestrates workflows — but can't redirect a running agent or detect drift.
+**Infrastructure layer — we sit above, not beside:**
 
-**We're not competing with these companies. We sit on top of them.** Auton manages agents that run *on* Temporal, *inside* Daytona sandboxes, *orchestrated by* Flyte. We're the governance layer.
+| Layer | Who | Funding | Relationship to Auton |
+|---|---|---|---|
+| **Execution** | Temporal | $300M, $5B val | Makes agents durable. Auton makes them governed. |
+| **Frameworks** | LangGraph, CrewAI, AutoGen | $260M+ combined | Build agents. Auton runs them safely. |
+| **Cloud platforms** | AWS, Azure, GCP | ∞ | Locked to one cloud. Auton is cross-cloud. |
 
-**Framework-level tools (LangGraph, CrewAI, AutoGen)** are developer libraries, not operational infrastructure. They help you build agents. We help you run them safely at scale.
+**Cloud incumbents** (Azure AI Agent Service, Bedrock Agents, Vertex AI) offer agent hosting within their walled gardens but no cross-cloud governance, no agent-level budget enforcement, no supervision trees, no drift detection. Auton is the neutral, framework-agnostic control plane.
+
+**The key insight:** Most existing tools address one dimension — orchestration OR observability OR governance. Nobody integrates lifecycle + budget + drift + supervision trees into a single control plane. That's us.
 
 ---
 
@@ -246,13 +248,13 @@ The agent infrastructure stack is forming clear tiers:
 
 ## Slide 13: Why Now
 
-### Three forces converging.
+### Three forces converging — and a closing window.
 
-**1. The funding wave confirms the market.** Temporal ($5B), Sierra ($10B), Render ($1.5B) — investors are pouring billions into agent infrastructure. But none of them are building the control plane. The gap is wide open.
+**1. The funding wave confirms the market.** Temporal ($5B), Sierra ($10B), LangChain ($1.25B), Fiddler ($100M) — billions are pouring into agent infrastructure. But none of them have the full control plane. The gap is open, and competitors are circling — Fiddler, Overmind, Prefactor all entered in 2025-2026.
 
-**2. Enterprise adoption is accelerating.** 2025 was experimentation. 2026-2027 is production deployment. Companies are hitting the "who watches the agents" wall *right now*.
+**2. Enterprise adoption is accelerating.** 2025 was experimentation. 2026-2027 is production deployment. Gartner says 40%+ of agent projects will fail without governance. Companies are hitting the "who watches the agents" wall *right now*.
 
-**3. The protocol window is open.** In infrastructure, the first standard wins (TCP/IP, HTTP, Docker, Kubernetes). The agent lifecycle protocol isn't established yet. **Twelve months from now, it will be.** We intend it to be ours.
+**3. The protocol window is closing.** In infrastructure, the first standard wins (TCP/IP, HTTP, Docker, Kubernetes). Anthropic MCP and Google A2A are establishing agent communication standards. The agent lifecycle protocol isn't established yet — **but the window is twelve months, not five years.** We intend it to be ours.
 
 ---
 
