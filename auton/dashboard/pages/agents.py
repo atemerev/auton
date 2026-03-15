@@ -216,7 +216,11 @@ def _render_sidebar_item(agent: dict, selected_path: str, depth: int = 0):
             with ui.column().classes("gap-0 min-w-0 flex-grow overflow-hidden"):
                 name = spec.get("name", agent.get("id", "?"))
                 ui.label(name).classes("text-sm font-medium text-slate-800 truncate")
-                ui.label(f"{state} · {_format_tokens(tokens)} tok").classes("text-xs text-slate-400 truncate")
+                idle_reason = agent.get("idle_reason")
+                sidebar_label = f"{state} · {_format_tokens(tokens)} tok"
+                if state == "idle" and idle_reason:
+                    sidebar_label = f"{idle_reason} · {_format_tokens(tokens)} tok"
+                ui.label(sidebar_label).classes("text-xs text-slate-400 truncate")
 
     # Render children in sidebar too
     for child in agent.get("children", []):
@@ -243,6 +247,8 @@ def _render_detail_panel(agent_path: str, registry):
             with ui.row().classes("items-center gap-2"):
                 ui.label(agent.get("path", "")).classes("text-sm text-slate-400 font-mono")
                 ui.badge(state.upper()).style(f"background-color: {color}; color: white")
+                if state == "idle" and agent.get("idle_reason"):
+                    ui.label(f"({agent['idle_reason']})").classes("text-xs text-slate-500")
                 if agent.get("uptime"):
                     ui.label(f"Up: {agent['uptime']}").classes("text-xs text-slate-400")
                 if agent.get("restart_count", 0) > 0:

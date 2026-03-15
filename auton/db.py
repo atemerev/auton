@@ -57,14 +57,12 @@ class Database:
                 created_at TEXT NOT NULL
             );
         """)
-        # Migration: drop policy_json column if it exists (old schema)
+        # Migrations
         try:
             cursor = await self._conn.execute("PRAGMA table_info(agents)")
             columns = [row[1] for row in await cursor.fetchall()]
-            if "policy_json" in columns:
-                # SQLite doesn't support DROP COLUMN before 3.35.0,
-                # so just ignore the column on read
-                pass
+            if "idle_reason" not in columns:
+                await self._conn.execute("ALTER TABLE agents ADD COLUMN idle_reason TEXT")
         except Exception:
             pass
         await self._conn.commit()
@@ -85,8 +83,8 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         await self._conn.execute(
             """INSERT OR REPLACE INTO agents
-               (id, path, parent_path, spec_json, state, health_json, restart_count, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, path, parent_path, spec_json, state, health_json, restart_count, idle_reason, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 node.id,
                 node.path,
@@ -95,6 +93,7 @@ class Database:
                 node.state.value,
                 node.health.model_dump_json(),
                 node.restart_count,
+                node.idle_reason.value if node.idle_reason else None,
                 node.created_at.isoformat(),
                 now,
             ),
@@ -104,7 +103,7 @@ class Database:
     async def load_agents(self) -> list[dict]:
         """Load all non-dead agents from the database."""
         cursor = await self._conn.execute(
-            "SELECT id, path, parent_path, spec_json, state, health_json, restart_count, created_at "
+            "SELECT id, path, parent_path, spec_json, state, health_json, restart_count, created_at, idle_reason "
             "FROM agents WHERE state NOT IN ('dead', 'terminating')"
         )
         rows = await cursor.fetchall()
@@ -119,6 +118,7 @@ class Database:
                 "health": json.loads(row[5]),
                 "restart_count": row[6],
                 "created_at": row[7],
+                "idle_reason": row[8],
             })
         return agents
 

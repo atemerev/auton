@@ -54,6 +54,14 @@ class SuspendReason(str, Enum):
     MANUAL = "manual"
 
 
+class IdleReason(str, Enum):
+    COMPLETED = "completed"                # agent called finish()
+    TURNS_EXHAUSTED = "turns_exhausted"    # ran out of max_turns
+    BUDGET_EXHAUSTED = "budget_exhausted"  # token budget hit ≥95%
+    TIME_EXHAUSTED = "time_exhausted"      # runtime budget exceeded
+    ERROR = "error"                        # non-fatal error (agent reported failure)
+
+
 class RestartPolicy(str, Enum):
     NEVER = "never"
     ON_FAILURE = "on_failure"
@@ -174,6 +182,7 @@ class AgentNode:
         self.parent_path = parent_path
         self.state = AgentState.SPAWNING
         self.suspend_reason: SuspendReason | None = None
+        self.idle_reason: IdleReason | None = None
         self.health = HealthSnapshot()
         self.children: dict[str, AgentNode] = {}
         self.created_at = datetime.now(timezone.utc)
@@ -257,6 +266,8 @@ class AgentNode:
         }
         if self.suspend_reason:
             result["suspend_reason"] = self.suspend_reason.value
+        if self.idle_reason:
+            result["idle_reason"] = self.idle_reason.value
         if self.error_message:
             result["error_message"] = self.error_message
         if include_children and depth < max_depth:

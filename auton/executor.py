@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from auton.budget import BudgetPlanner
 from auton.drift import DRIFT_CHECK_INTERVAL, judge_drift
 from auton.llm import LLMClient
-from auton.models import AgentNode, AgentState, SuspendReason
+from auton.models import AgentNode, AgentState, IdleReason, SuspendReason
 from auton.tools import TOOL_REGISTRY, function_to_schema
 from auton.tools.workspace_tools import (
     make_list_files,
@@ -151,6 +151,7 @@ class AgentExecutor:
         self.db = db
         self.registry = registry
         self._task: asyncio.Task | None = None
+        self._idle_reason: IdleReason | None = None
 
     def start(self) -> asyncio.Task:
         """Start execution as a background task."""
@@ -193,6 +194,7 @@ class AgentExecutor:
                         "detail": error_msg,
                     })
                 else:
+                    self.node.idle_reason = self._idle_reason
                     self.node.transition(AgentState.IDLE)
             if self.db:
                 await self.db.save_agent(self.node)
@@ -508,6 +510,7 @@ class AgentExecutor:
                         logger.warning(f"Agent {node.id} final save: no write_file tool available")
                 except Exception as e:
                     logger.warning(f"Agent {node.id} final save failed: {e}")
+                self._idle_reason = IdleReason.BUDGET_EXHAUSTED
                 break
 
             # Runtime budget check
@@ -516,6 +519,7 @@ class AgentExecutor:
                     f"Agent {node.id} exceeded runtime budget: "
                     f"{elapsed:.0f}s > {node.spec.max_runtime_seconds}s"
                 )
+                self._idle_reason = IdleReason.TIME_EXHAUSTED
                 break
 
             # Publish progress with budget info
@@ -537,7 +541,11 @@ class AgentExecutor:
             # Stop requested (by finish tool, budget planner, etc.)
             if llm._stop_requested:
                 logger.info(f"Agent {node.id} finished (stop requested)")
+                self._idle_reason = IdleReason.COMPLETED
                 break
+        else:
+            # Loop completed without break — all turns consumed
+            self._idle_reason = IdleReason.TURNS_EXHAUSTED
 
         # Final checkpoint
         turns_completed = turn + 1 if node.spec.max_turns > 0 else 0

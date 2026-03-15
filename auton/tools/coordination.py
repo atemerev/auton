@@ -217,6 +217,8 @@ def make_check_child_status(agent_id: str, registry):
 
         if node.error_message:
             result["error"] = node.error_message
+        if node.idle_reason:
+            result["idle_reason"] = node.idle_reason.value
 
         # Include last assistant response if idle (i.e., finished)
         if node.state.value in ("idle", "suspended"):

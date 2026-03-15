@@ -8,7 +8,7 @@ import pytest
 import httpx
 
 from auton.api import app, registry, _publish_event
-from auton.models import AgentSpec, AgentState, SpawnRequest
+from auton.models import AgentNode, AgentSpec, AgentState, IdleReason, SpawnRequest
 from auton.tools.coordination import (
     make_check_child_status,
     make_list_children,
@@ -248,12 +248,14 @@ def test_check_child_status_idle_includes_response():
         {"role": "user", "content": "Do the task"},
         {"role": "assistant", "content": "Task completed successfully. Here are my findings."},
     ]
+    child.idle_reason = IdleReason.COMPLETED
     child.transition(AgentState.IDLE)
 
     check_fn = make_check_child_status("test-parent", registry)
     result = json.loads(check_fn("test-parent/child-1"))
     assert result["status"] == "OK"
     assert result["state"] == "idle"
+    assert result["idle_reason"] == "completed"
     assert "last_response" in result
     assert "Task completed" in result["last_response"]
 
@@ -462,3 +464,60 @@ async def test_spawn_coordinator_with_coordination_tools():
     assert "message_agent" in registered_tools
     assert "list_children" in registered_tools
     assert "check_child_status" in registered_tools
+
+
+# ---------------------------------------------------------------------------
+# IdleReason tests
+# ---------------------------------------------------------------------------
+
+
+def test_idle_reason_in_to_dict():
+    """idle_reason appears in to_dict() when set."""
+    spec = AgentSpec(name="Test", system_prompt="Test.", goal="Test")
+    node = AgentNode(id="test-idle", spec=spec)
+    node.state = AgentState.IDLE
+    node.idle_reason = IdleReason.COMPLETED
+
+    d = node.to_dict()
+    assert d["state"] == "idle"
+    assert d["idle_reason"] == "completed"
+
+
+def test_idle_reason_absent_when_none():
+    """idle_reason is omitted from to_dict() when not set."""
+    spec = AgentSpec(name="Test", system_prompt="Test.", goal="Test")
+    node = AgentNode(id="test-idle", spec=spec)
+    node.state = AgentState.IDLE
+
+    d = node.to_dict()
+    assert "idle_reason" not in d
+
+
+def test_idle_reason_cleared_on_message_wakeup():
+    """Sending a message to an idle agent clears idle_reason."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    spec = AgentSpec(name="Test", system_prompt="Test.", goal="Test")
+    node = _spawn_no_executor(SpawnRequest(id="test-idle", spec=spec))
+    node.transition(AgentState.IDLE)
+    node.idle_reason = IdleReason.TURNS_EXHAUSTED
+
+    registry.send_message("test-idle", "continue please")
+    assert node.state == AgentState.RUNNING
+    assert node.idle_reason is None
+
+
+def test_idle_reason_cleared_on_correction():
+    """Correcting an idle agent clears idle_reason."""
+    registry.publish_event = _publish_event
+    registry.db = None
+
+    spec = AgentSpec(name="Test", system_prompt="Test.", goal="Test")
+    node = _spawn_no_executor(SpawnRequest(id="test-idle", spec=spec))
+    node.transition(AgentState.IDLE)
+    node.idle_reason = IdleReason.BUDGET_EXHAUSTED
+
+    registry.correct("test-idle", "try a different approach")
+    assert node.state == AgentState.RUNNING
+    assert node.idle_reason is None

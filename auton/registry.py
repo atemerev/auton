@@ -12,6 +12,7 @@ from .models import (
     AgentSpec,
     AgentState,
     HealthSnapshot,
+    IdleReason,
     InvalidTransition,
     SpawnRequest,
     SuspendReason,
@@ -186,6 +187,7 @@ class AgentRegistry:
             raise InvalidTransition(
                 f"Cannot correct agent in state {node.state.value}"
             )
+        node.idle_reason = None
         node.transition(AgentState.CORRECTING)
         node.messages.append({
             "role": "correction",
@@ -236,6 +238,7 @@ class AgentRegistry:
         node._log_event("message_received", {"channel": channel, "kind": kind})
         # If idle, wake up
         if node.state == AgentState.IDLE:
+            node.idle_reason = None
             node.transition(AgentState.RUNNING)
         return node
 
@@ -256,6 +259,7 @@ class AgentRegistry:
 
         # Re-initialize
         node.state = AgentState.SPAWNING
+        node.idle_reason = None
         node.restart_count += 1
         node.health = node.health.model_copy()
         node.health.loops_detected = 0
@@ -326,6 +330,8 @@ class AgentRegistry:
         node.state = AgentState(data["state"])
         node.health = HealthSnapshot(**data.get("health", {}))
         node.restart_count = data.get("restart_count", 0)
+        if data.get("idle_reason"):
+            node.idle_reason = IdleReason(data["idle_reason"])
         if data.get("created_at"):
             node.created_at = datetime.fromisoformat(data["created_at"])
 
