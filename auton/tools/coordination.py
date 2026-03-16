@@ -26,6 +26,7 @@ def make_spawn_child(agent_id: str, agent_path: str, registry, budget_planner=No
     _DEFAULT_CHILD_TOOLS = [
         "web_search", "fetch_webpage",
         "write_file", "read_file", "list_files",
+        "publish_artifact",
         "check_budget", "finish",
     ]
 
@@ -178,6 +179,11 @@ def make_list_children(agent_id: str, agent_path: str, registry):
             }
             if child.error_message:
                 info["error"] = child.error_message
+            if child.artifacts:
+                info["artifact_count"] = len(child.artifacts)
+                info["artifacts_published"] = sum(
+                    1 for a in child.artifacts if a.status.value == "published"
+                )
             children.append(info)
 
         return json.dumps({"status": "OK", "children": children, "count": len(children)})
@@ -219,6 +225,18 @@ def make_check_child_status(agent_id: str, registry):
             result["error"] = node.error_message
         if node.idle_reason:
             result["idle_reason"] = node.idle_reason.value
+
+        # Include artifact info
+        if node.artifacts:
+            published = [a for a in node.artifacts if a.status.value == "published"]
+            missing = [a for a in node.artifacts if a.status.value == "missing"]
+            expected = [a for a in node.artifacts if a.status.value == "expected"]
+            result["artifacts"] = {
+                "published": [{"name": a.name, "file_path": a.file_path} for a in published],
+                "missing": [a.name for a in missing],
+                "pending": [a.name for a in expected],
+                "total": len(node.artifacts),
+            }
 
         # Include last assistant response if idle (i.e., finished)
         if node.state.value in ("idle", "suspended"):

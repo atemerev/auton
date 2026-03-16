@@ -12,11 +12,12 @@ from datetime import datetime, timezone
 from auton.budget import BudgetPlanner
 from auton.drift import DRIFT_CHECK_INTERVAL, judge_drift
 from auton.llm import LLMClient
-from auton.models import AgentNode, AgentState, IdleReason, SuspendReason
+from auton.models import AgentNode, AgentState, ArtifactRecord, ArtifactStatus, IdleReason, SuspendReason
 from auton.tools import TOOL_REGISTRY, function_to_schema
 from auton.tools.workspace_tools import (
     make_list_files,
     make_pass_artifact,
+    make_publish_artifact,
     make_read_file,
     make_shell_exec,
     make_write_file,
@@ -47,7 +48,7 @@ CLOSURE_TOOLS = {
     # Shell tool
     "shell_exec",
     # Artifact sharing
-    "pass_artifact",
+    "pass_artifact", "publish_artifact",
     # Agent coordination
     "spawn_child", "message_agent", "list_children", "check_child_status", "read_child_file",
     # Control
@@ -55,7 +56,7 @@ CLOSURE_TOOLS = {
 }
 
 # Tools that require a workspace directory
-WORKSPACE_TOOLS = {"write_file", "read_file", "list_files", "shell_exec", "pass_artifact"}
+WORKSPACE_TOOLS = {"write_file", "read_file", "list_files", "shell_exec", "pass_artifact", "publish_artifact"}
 
 # Tools available during write gate (save + informational — everything else is gated)
 SAVE_GATE_TOOLS = {"write_file", "read_file", "list_files", "finish", "check_budget"}
@@ -194,6 +195,8 @@ class AgentExecutor:
                         "detail": error_msg,
                     })
                 else:
+                    # Check expected artifact completeness before going IDLE
+                    await self._check_artifact_completeness()
                     self.node.idle_reason = self._idle_reason
                     self.node.transition(AgentState.IDLE)
             if self.db:
@@ -251,7 +254,43 @@ class AgentExecutor:
                 "Do NOT leave deliverables for the end — save incrementally.]"
             )
 
+        if node.spec.expected_artifacts:
+            names = [f"{a.name} ({a.file_path})" for a in node.spec.expected_artifacts]
+            msg += (
+                f"\n\n[Expected deliverables: {', '.join(names)}. "
+                "Write each file to your workspace and call publish_artifact to register it.]"
+            )
+
         return msg
+
+    async def _check_artifact_completeness(self) -> None:
+        """Check expected artifacts: auto-promote if file exists, mark missing otherwise."""
+        from auton.workspace import get_workspace_path
+        node = self.node
+        if not node.artifacts:
+            return
+        for artifact in node.artifacts:
+            if artifact.status != ArtifactStatus.EXPECTED:
+                continue
+            ws = get_workspace_path(node.id)
+            target = ws / artifact.file_path
+            if target.exists() and target.is_file():
+                artifact.status = ArtifactStatus.PUBLISHED
+                artifact.file_size = target.stat().st_size
+                artifact.updated_at = datetime.now(timezone.utc)
+            else:
+                artifact.status = ArtifactStatus.MISSING
+                artifact.updated_at = datetime.now(timezone.utc)
+            if self.db:
+                await self.db.save_artifact(artifact.model_dump())
+        missing = [a for a in node.artifacts if a.status == ArtifactStatus.MISSING]
+        if missing:
+            names = [a.name for a in missing]
+            node._log_event("missing_artifacts", {"names": names})
+            self.publish_event(node.path, {
+                "type": "missing_artifacts",
+                "artifacts": names,
+            })
 
     async def run(self) -> None:
         """Main execution loop with budget-aware steering."""
@@ -353,6 +392,11 @@ class AgentExecutor:
             fn = make_pass_artifact(node.id, self.registry)
             llm.add_tool(fn, function_to_schema(fn))
 
+        # Artifact publishing (registers workspace files with metadata)
+        if "publish_artifact" in requested_tools and self.registry:
+            fn = make_publish_artifact(node.id, node.path, self.registry)
+            llm.add_tool(fn, function_to_schema(fn))
+
         # Agent coordination tools (need registry)
         if "spawn_child" in requested_tools and self.registry:
             fn = make_spawn_child(node.id, node.path, self.registry, budget_planner=planner)
@@ -381,6 +425,23 @@ class AgentExecutor:
             llm.add_tool(fn, function_to_schema(fn))
 
         logger.info(f"Registered tools for {node.id}: {list(llm._tools.keys())}")
+
+        # Seed expected artifacts from spec
+        if node.spec.expected_artifacts and not node.artifacts:
+            for aspec in node.spec.expected_artifacts:
+                record = ArtifactRecord(
+                    name=aspec.name,
+                    file_path=aspec.file_path,
+                    agent_id=node.id,
+                    agent_path=node.path,
+                    mime_type=aspec.mime_type,
+                    description=aspec.description,
+                    tags=aspec.tags,
+                    status=ArtifactStatus.EXPECTED,
+                )
+                node.artifacts.append(record)
+                if self.db:
+                    await self.db.save_artifact(record.model_dump())
 
         # Build initial message — goal with budget context
         initial_message = self._build_initial_message()
@@ -462,6 +523,19 @@ class AgentExecutor:
                     ]
                     work_summary = "\n".join(assistant_msgs[-3:]) if assistant_msgs else "(no findings yet)"
 
+                    # If expected artifacts are declared, mention them in the save prompt
+                    expected_files = []
+                    if node.spec.expected_artifacts:
+                        expected_files = [
+                            f"{a.name} ({a.file_path})" for a in node.spec.expected_artifacts
+                            if not any(r.file_path == a.file_path and r.status == ArtifactStatus.PUBLISHED
+                                       for r in node.artifacts)
+                        ]
+                    deliverable_hint = (
+                        f"Expected deliverables still missing: {', '.join(expected_files)}. "
+                        if expected_files else ""
+                    )
+
                     save_messages = [
                         {"role": "system", "content": (
                             "You are a research agent. Your budget is exhausted. "
@@ -471,6 +545,7 @@ class AgentExecutor:
                         {"role": "user", "content": (
                             f"Your original goal: {node.spec.goal}\n\n"
                             f"Your recent findings:\n{work_summary}\n\n"
+                            f"{deliverable_hint}"
                             "WRITE ALL YOUR FINDINGS to dossier.md using the write_file tool NOW."
                         )},
                     ]

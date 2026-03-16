@@ -17,6 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 from .models import (
     AgentSpec,
     AgentState,
+    ArtifactRecord,
     CorrectionRequest,
     InvalidTransition,
     MessageRequest,
@@ -102,6 +103,10 @@ async def lifespan(app: FastAPI):
     agents = await db.load_agents()
     for agent_data in agents:
         node = registry.restore(agent_data)
+        # Restore artifacts from DB
+        artifacts = await db.list_artifacts(agent_id=node.id)
+        for a in artifacts:
+            node.artifacts.append(ArtifactRecord(**a))
         # Resume scheduled agents that were idle
         if node.state == AgentState.IDLE and node.spec.schedule:
             logger.info(f"Restored scheduled agent: {node.path}")
@@ -136,6 +141,8 @@ async def lifespan(app: FastAPI):
 async def _save_tree(node, db):
     """Recursively save all agents in a tree."""
     await db.save_agent(node)
+    for artifact in node.artifacts:
+        await db.save_artifact(artifact.model_dump())
     for child in node.children.values():
         await _save_tree(child, db)
 
@@ -227,6 +234,13 @@ async def get_agent(path: str):
         from .workspace import list_workspace_files
         files = list_workspace_files(node.id)
         return {"agent": agent_path, "files": files, "count": len(files)}
+    if path.endswith("/artifacts"):
+        agent_path = path.rsplit("/artifacts", 1)[0]
+        node = registry.resolve(agent_path)
+        if node is None:
+            raise _error(404, f"Agent not found: {agent_path}")
+        artifacts = [a.model_dump() for a in node.artifacts] if node.artifacts else []
+        return {"agent": agent_path, "artifacts": artifacts, "count": len(artifacts)}
 
     result = registry.subtree(path)
     if result is None:
@@ -578,6 +592,62 @@ async def stream_rollout(path: str, request: Request):
                 _observers[path].remove(queue)
 
     return EventSourceResponse(event_generator())
+
+
+# ---------------------------------------------------------------------------
+# Artifacts
+# ---------------------------------------------------------------------------
+
+
+@app.get("/artifacts")
+async def list_artifacts(
+    agent_id: str | None = None,
+    status: str | None = None,
+    mime_type: str | None = None,
+    tag: str | None = None,
+):
+    """List all artifacts, optionally filtered."""
+    if not registry.db:
+        raise _error(500, "Database not initialized")
+    artifacts = await registry.db.list_artifacts(
+        agent_id=agent_id, status=status, mime_type=mime_type, tag=tag,
+    )
+    return {"artifacts": artifacts, "count": len(artifacts)}
+
+
+@app.get("/artifacts/{artifact_id}")
+async def get_artifact(artifact_id: str):
+    """Get artifact metadata by ID."""
+    if not registry.db:
+        raise _error(500, "Database not initialized")
+    artifact = await registry.db.get_artifact(artifact_id)
+    if not artifact:
+        raise _error(404, f"Artifact not found: {artifact_id}")
+    return artifact
+
+
+@app.get("/artifacts/{artifact_id}/content")
+async def get_artifact_content(artifact_id: str):
+    """Serve the actual file content of an artifact."""
+    if not registry.db:
+        raise _error(500, "Database not initialized")
+    artifact = await registry.db.get_artifact(artifact_id)
+    if not artifact:
+        raise _error(404, f"Artifact not found: {artifact_id}")
+
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    from .workspace import get_workspace_path
+
+    ws = get_workspace_path(artifact["agent_id"])
+    file_path = ws / artifact["file_path"]
+    if not file_path.exists():
+        raise _error(404, f"Artifact file not found on disk: {artifact['file_path']}")
+    return FileResponse(
+        str(file_path),
+        media_type=artifact.get("mime_type", "text/plain"),
+        filename=Path(artifact["file_path"]).name,
+    )
 
 
 # ---------------------------------------------------------------------------

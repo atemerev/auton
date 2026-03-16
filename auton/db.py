@@ -50,11 +50,18 @@ class Database:
 
             CREATE TABLE IF NOT EXISTS artifacts (
                 id TEXT PRIMARY KEY,
-                source_agent_id TEXT NOT NULL,
-                target_agent_id TEXT,
+                name TEXT NOT NULL,
                 file_path TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                agent_path TEXT NOT NULL,
+                mime_type TEXT NOT NULL DEFAULT 'text/markdown',
+                description TEXT NOT NULL DEFAULT '',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'expected',
                 file_size INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
             );
         """)
         # Migrations
@@ -63,6 +70,31 @@ class Database:
             columns = [row[1] for row in await cursor.fetchall()]
             if "idle_reason" not in columns:
                 await self._conn.execute("ALTER TABLE agents ADD COLUMN idle_reason TEXT")
+        except Exception:
+            pass
+        # Migrate old artifacts schema (had source_agent_id instead of agent_id)
+        try:
+            cursor = await self._conn.execute("PRAGMA table_info(artifacts)")
+            columns = [row[1] for row in await cursor.fetchall()]
+            if "source_agent_id" in columns:
+                await self._conn.execute("DROP TABLE artifacts")
+                await self._conn.execute("""
+                    CREATE TABLE artifacts (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        file_path TEXT NOT NULL,
+                        agent_id TEXT NOT NULL,
+                        agent_path TEXT NOT NULL,
+                        mime_type TEXT NOT NULL DEFAULT 'text/markdown',
+                        description TEXT NOT NULL DEFAULT '',
+                        tags_json TEXT NOT NULL DEFAULT '[]',
+                        status TEXT NOT NULL DEFAULT 'expected',
+                        file_size INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (agent_id) REFERENCES agents(id)
+                    )
+                """)
         except Exception:
             pass
         await self._conn.commit()
@@ -199,36 +231,98 @@ class Database:
     # Artifacts
     # ------------------------------------------------------------------
 
-    async def save_artifact(
-        self, artifact_id: str, source_id: str, target_id: str | None,
-        file_path: str, file_size: int,
-    ) -> None:
-        """Record an artifact transfer."""
+    async def save_artifact(self, record: dict) -> None:
+        """Upsert an artifact record."""
         now = datetime.now(timezone.utc).isoformat()
+        tags_json = json.dumps(record.get("tags", []))
         await self._conn.execute(
-            "INSERT OR REPLACE INTO artifacts (id, source_agent_id, target_agent_id, file_path, file_size, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (artifact_id, source_id, target_id, file_path, file_size, now),
+            """INSERT OR REPLACE INTO artifacts
+               (id, name, file_path, agent_id, agent_path, mime_type,
+                description, tags_json, status, file_size, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                record["id"],
+                record["name"],
+                record["file_path"],
+                record["agent_id"],
+                record["agent_path"],
+                record.get("mime_type", "text/markdown"),
+                record.get("description", ""),
+                tags_json,
+                record.get("status", "expected"),
+                record.get("file_size", 0),
+                record.get("created_at", now),
+                now,
+            ),
         )
         await self._conn.commit()
 
-    async def list_artifacts(self, agent_id: str) -> list[dict]:
-        """List artifacts created by or sent to an agent."""
+    async def get_artifact(self, artifact_id: str) -> dict | None:
+        """Get a single artifact by ID."""
         cursor = await self._conn.execute(
-            "SELECT id, source_agent_id, target_agent_id, file_path, file_size, created_at "
-            "FROM artifacts WHERE source_agent_id = ? OR target_agent_id = ? "
-            "ORDER BY created_at DESC",
-            (agent_id, agent_id),
+            "SELECT id, name, file_path, agent_id, agent_path, mime_type, "
+            "description, tags_json, status, file_size, created_at, updated_at "
+            "FROM artifacts WHERE id = ?",
+            (artifact_id,),
         )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return self._row_to_artifact(row)
+
+    async def list_artifacts(
+        self,
+        agent_id: str | None = None,
+        status: str | None = None,
+        mime_type: str | None = None,
+        tag: str | None = None,
+    ) -> list[dict]:
+        """List artifacts with optional filters."""
+        query = (
+            "SELECT id, name, file_path, agent_id, agent_path, mime_type, "
+            "description, tags_json, status, file_size, created_at, updated_at "
+            "FROM artifacts WHERE 1=1"
+        )
+        params: list = []
+        if agent_id:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if mime_type:
+            query += " AND mime_type = ?"
+            params.append(mime_type)
+        if tag:
+            query += " AND tags_json LIKE ?"
+            params.append(f'%"{tag}"%')
+        query += " ORDER BY created_at DESC"
+        cursor = await self._conn.execute(query, params)
         rows = await cursor.fetchall()
-        return [
-            {
-                "id": row[0],
-                "source_agent_id": row[1],
-                "target_agent_id": row[2],
-                "file_path": row[3],
-                "file_size": row[4],
-                "created_at": row[5],
-            }
-            for row in rows
-        ]
+        return [self._row_to_artifact(row) for row in rows]
+
+    async def update_artifact_status(self, artifact_id: str, status: str) -> None:
+        """Update artifact status."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._conn.execute(
+            "UPDATE artifacts SET status = ?, updated_at = ? WHERE id = ?",
+            (status, now, artifact_id),
+        )
+        await self._conn.commit()
+
+    @staticmethod
+    def _row_to_artifact(row) -> dict:
+        return {
+            "id": row[0],
+            "name": row[1],
+            "file_path": row[2],
+            "agent_id": row[3],
+            "agent_path": row[4],
+            "mime_type": row[5],
+            "description": row[6],
+            "tags": json.loads(row[7]),
+            "status": row[8],
+            "file_size": row[9],
+            "created_at": row[10],
+            "updated_at": row[11],
+        }

@@ -187,6 +187,97 @@ def make_shell_exec(agent_id: str):
 # ---------------------------------------------------------------------------
 
 
+def make_publish_artifact(agent_id: str, agent_path: str, registry):
+    """Create a publish_artifact tool that registers a workspace file as a named artifact."""
+
+    def publish_artifact(
+        file_path: str,
+        name: str,
+        description: str = "",
+        mime_type: str = "text/markdown",
+        tags: str = "[]",
+    ) -> str:
+        """Register a file in your workspace as a named artifact.
+
+        Call this after writing a file to make it discoverable by parent agents
+        and the API. Use descriptive names and tags for easy retrieval.
+
+        Args:
+            file_path: Relative path to the file in your workspace (must already exist)
+            name: Human-readable artifact name (e.g. "Market Analysis Report")
+            description: What this artifact contains
+            mime_type: Content type (e.g. "text/markdown", "application/json", "text/csv")
+            tags: JSON array of tags for categorization (e.g. '["research", "finance"]')
+
+        Returns:
+            Confirmation with artifact ID and metadata
+        """
+        from auton.models import ArtifactRecord, ArtifactStatus
+
+        ws = get_workspace_path(agent_id)
+        target = _safe_resolve(ws, file_path)
+        if target is None:
+            return json.dumps({"status": "error", "message": "Path escapes workspace boundary"})
+        if not target.exists():
+            return json.dumps({"status": "error", "message": f"File not found: {file_path}. Write the file first."})
+        if not target.is_file():
+            return json.dumps({"status": "error", "message": f"Not a file: {file_path}"})
+
+        try:
+            parsed_tags = json.loads(tags) if isinstance(tags, str) else tags
+        except (json.JSONDecodeError, TypeError):
+            parsed_tags = []
+
+        file_size = target.stat().st_size
+        node = registry.resolve(agent_path)
+
+        # Check if this matches an expected artifact (by file_path)
+        existing = None
+        if node:
+            for artifact in node.artifacts:
+                if artifact.file_path == file_path and artifact.status == ArtifactStatus.EXPECTED:
+                    existing = artifact
+                    break
+
+        if existing:
+            existing.status = ArtifactStatus.PUBLISHED
+            existing.file_size = file_size
+            existing.name = name or existing.name
+            existing.description = description or existing.description
+            existing.mime_type = mime_type or existing.mime_type
+            if parsed_tags:
+                existing.tags = parsed_tags
+            from datetime import datetime, timezone
+            existing.updated_at = datetime.now(timezone.utc)
+            artifact_id = existing.id
+        else:
+            record = ArtifactRecord(
+                name=name,
+                file_path=file_path,
+                agent_id=agent_id,
+                agent_path=agent_path,
+                mime_type=mime_type,
+                description=description,
+                tags=parsed_tags,
+                status=ArtifactStatus.PUBLISHED,
+                file_size=file_size,
+            )
+            if node:
+                node.artifacts.append(record)
+            artifact_id = record.id
+
+        return json.dumps({
+            "status": "OK",
+            "artifact_id": artifact_id,
+            "name": name,
+            "file_path": file_path,
+            "file_size": file_size,
+            "mime_type": mime_type,
+        })
+
+    return publish_artifact
+
+
 def make_pass_artifact(agent_id: str, registry):
     """Create a pass_artifact tool that copies files to another agent's workspace."""
 

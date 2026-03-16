@@ -62,6 +62,12 @@ class IdleReason(str, Enum):
     ERROR = "error"                        # non-fatal error (agent reported failure)
 
 
+class ArtifactStatus(str, Enum):
+    EXPECTED = "expected"      # declared in spec, not yet produced
+    PUBLISHED = "published"    # file written and registered
+    MISSING = "missing"        # agent finished without producing it
+
+
 class RestartPolicy(str, Enum):
     NEVER = "never"
     ON_FAILURE = "on_failure"
@@ -77,6 +83,15 @@ class SupervisionStrategy(str, Enum):
 # ---------------------------------------------------------------------------
 # Unified Agent Spec (OTP child_spec equivalent)
 # ---------------------------------------------------------------------------
+
+
+class ArtifactSpec(BaseModel):
+    """Declared artifact expectation in AgentSpec."""
+    name: str                          # e.g. "research-dossier"
+    file_path: str                     # relative to workspace, e.g. "dossier.md"
+    mime_type: str = "text/markdown"
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
 
 
 class AgentSpec(BaseModel):
@@ -120,6 +135,9 @@ class AgentSpec(BaseModel):
     max_children: int = 10
     max_depth: int = 3
 
+    # ── Artifacts ──
+    expected_artifacts: list[ArtifactSpec] = Field(default_factory=list)
+
     # ── Extensibility ──
     metadata: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
@@ -137,6 +155,22 @@ class HealthSnapshot(BaseModel):
     tokens_total: int = 0
     loops_detected: int = 0
     last_check: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ArtifactRecord(BaseModel):
+    """Full metadata for a registered artifact."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    file_path: str
+    agent_id: str
+    agent_path: str
+    mime_type: str = "text/markdown"
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    status: ArtifactStatus = ArtifactStatus.EXPECTED
+    file_size: int = 0
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class SpawnRequest(BaseModel):
@@ -183,6 +217,7 @@ class AgentNode:
         self.state = AgentState.SPAWNING
         self.suspend_reason: SuspendReason | None = None
         self.idle_reason: IdleReason | None = None
+        self.artifacts: list[ArtifactRecord] = []
         self.health = HealthSnapshot()
         self.children: dict[str, AgentNode] = {}
         self.created_at = datetime.now(timezone.utc)
@@ -263,6 +298,7 @@ class AgentNode:
             "restart_count": self.restart_count,
             "checkpoints": len(self.checkpoints),
             "conversation_length": len(self.conversation),
+            "artifact_count": len(self.artifacts),
         }
         if self.suspend_reason:
             result["suspend_reason"] = self.suspend_reason.value
