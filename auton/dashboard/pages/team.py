@@ -16,6 +16,7 @@ from litellm import acompletion
 from ..sessions import get_user_and_tokens
 from ..constants import TIER_FREE, TIER_FOUNDER, TIER_NAMES
 from ..style import PRIMARY
+from ..layouts import default as default_layout
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,79 @@ TOOL_BUNDLES = {
         "tools": ["spawn_child", "message_agent", "list_children", "check_child_status"],
     },
 }
+
+# ---------------------------------------------------------------------------
+# Pre-defined role templates
+# ---------------------------------------------------------------------------
+
+ROLE_TEMPLATES = [
+    {
+        "emoji": "🔍",
+        "title": "Lead Generator",
+        "description": "Find and qualify potential customers, research companies, and build prospect lists",
+        "vacancy_text": (
+            "I need a lead generation specialist who can research companies in target markets, "
+            "find decision-makers and their contact information, qualify leads based on ICP criteria, "
+            "and produce structured prospect lists with enrichment data."
+        ),
+        "suggested_bundles": ["web_research", "files"],
+    },
+    {
+        "emoji": "💰",
+        "title": "Fundraiser",
+        "description": "Research investors, prepare outreach materials, and track fundraising pipeline",
+        "vacancy_text": (
+            "I need a fundraising research assistant who can identify relevant investors and VCs, "
+            "research their portfolio and investment thesis, prepare personalized outreach drafts, "
+            "and maintain a structured pipeline of fundraising conversations."
+        ),
+        "suggested_bundles": ["web_research", "files"],
+    },
+    {
+        "emoji": "💻",
+        "title": "Software Engineer",
+        "description": "Write code, fix bugs, implement features, and manage development tasks",
+        "vacancy_text": (
+            "I need a software engineer who can write clean, production-quality code, "
+            "debug issues, implement new features, write tests, and follow best practices. "
+            "They should be comfortable with multiple languages and frameworks."
+        ),
+        "suggested_bundles": ["code", "files"],
+    },
+    {
+        "emoji": "📊",
+        "title": "Market Researcher",
+        "description": "Analyze competitors, track market trends, and produce intelligence reports",
+        "vacancy_text": (
+            "I need a market research analyst who can monitor competitors, "
+            "analyze pricing strategies, track industry trends and news, "
+            "and produce weekly competitive intelligence reports."
+        ),
+        "suggested_bundles": ["web_research", "files"],
+    },
+    {
+        "emoji": "📝",
+        "title": "Content Writer",
+        "description": "Write blog posts, social media content, newsletters, and marketing copy",
+        "vacancy_text": (
+            "I need a content writer who can produce engaging blog posts, social media content, "
+            "email newsletters, and marketing copy. They should adapt tone to different audiences "
+            "and maintain brand consistency across channels."
+        ),
+        "suggested_bundles": ["web_research", "files"],
+    },
+    {
+        "emoji": "🛡️",
+        "title": "Security Analyst",
+        "description": "Monitor for vulnerabilities, review code for security issues, and track threats",
+        "vacancy_text": (
+            "I need a security analyst who can scan codebases for vulnerabilities, "
+            "monitor security advisories, review dependencies for known CVEs, "
+            "and produce security assessment reports with remediation recommendations."
+        ),
+        "suggested_bundles": ["code", "web_research", "files"],
+    },
+]
 
 STATUS_COLORS = {
     "active": "#22c55e",
@@ -139,45 +213,17 @@ def _bundles_to_tools(bundle_keys: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Page renderer
+# Page renderer — uses default layout (no sidebar)
 # ---------------------------------------------------------------------------
 
 def render_team_dashboard(request: Request) -> Optional[Response]:
-    """Full-viewport layout: employee sidebar + detail panel."""
+    """Team page using default navbar layout with card grid."""
 
-    # Auth guard
-    user, toks = get_user_and_tokens(request)
-    if not user or not toks:
-        return RedirectResponse("/login")
-    if not user.tos_confirmed and request.url.path != "/welcome":
-        return RedirectResponse("/welcome")
-
-    selected_id = request.query_params.get("employee")
-    current_path = request.url.path
-
-    # Load employees synchronously via run_until_complete on the existing loop
+    # Load employees
     db = _get_db()
     employees: list[dict] = []
 
-    async def _load():
-        nonlocal employees
-        if db:
-            employees = await db.load_employees()
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # NiceGUI runs inside an async context; use background task approach
-            import concurrent.futures
-            fut = asyncio.ensure_future(_load())
-            # We can't block here, so we'll load via a synchronous fallback
-        else:
-            loop.run_until_complete(_load())
-    except Exception:
-        pass
-
-    # Try a synchronous DB read as fallback
-    if not employees and db and db._conn:
+    if db and db._conn:
         try:
             import sqlite3
             sync_conn = sqlite3.connect(db.path)
@@ -189,166 +235,76 @@ def render_team_dashboard(request: Request) -> Optional[Response]:
         except Exception as e:
             logger.debug(f"Sync employee load fallback: {e}")
 
-    if not selected_id and employees:
-        selected_id = employees[0].get("id")
+    selected_id = request.query_params.get("employee")
 
-    # Styling
-    ui.colors(primary=PRIMARY)
-    ui.add_head_html("""
-    <style>
-        body { margin: 0 !important; padding: 0 !important; }
-        .nicegui-content { padding: 0 !important; margin: 0 !important; gap: 0 !important; overflow: hidden; }
-        .q-page { padding: 0 !important; }
-    </style>
-    """)
+    def content():
+        vacancy_dialog = _build_vacancy_dialog()
 
-    # Build the vacancy dialog (must be in page context, before layout references it)
-    vacancy_dialog = _build_vacancy_dialog()
+        with ui.column().classes("w-full max-w-6xl mx-auto p-6 gap-6"):
+            # Page header
+            with ui.row().classes("w-full items-center justify-between"):
+                ui.label("Team").classes("text-2xl font-bold text-slate-800")
+                ui.button("Hire New Member", icon="person_add",
+                          on_click=lambda: vacancy_dialog.open()) \
+                    .props("unelevated no-caps color=primary")
 
-    with ui.row().classes("w-screen gap-0 flex-nowrap").style("height: 100vh; overflow: hidden"):
-
-        # ════════════════════════════════
-        # LEFT SIDEBAR
-        # ════════════════════════════════
-        with ui.column().classes("gap-0 bg-slate-50 border-r border-slate-200 flex-shrink-0") \
-                .style("width: 280px; min-width: 280px; height: 100vh"):
-
-            # Branding
-            with ui.row().classes("items-center gap-3 px-5 py-4 border-b border-slate-200"):
-                with ui.link(target="/").classes("no-underline flex items-center gap-2"):
-                    ui.image("/static/dashboard/favicon.svg").classes("w-7 h-7")
-                    ui.label("AUTON").classes("text-xl font-bold").style("color: #16203C")
-
-            # Team label + hire button
-            with ui.row().classes("w-full justify-between items-center px-4 py-2 border-b border-slate-100"):
-                ui.label("Team").classes("text-xs font-semibold text-slate-400 uppercase tracking-wider")
-                with ui.row().classes("gap-1"):
-                    ui.button(icon="refresh", on_click=lambda: ui.navigate.reload()) \
-                        .props("flat dense round size=xs").classes("text-slate-400")
-                    ui.button(icon="person_add", on_click=lambda: vacancy_dialog.open()) \
-                        .props("flat dense round size=xs").classes("text-teal-600") \
-                        .tooltip("Open a new position")
-
-            # Employee list
-            with ui.column().classes("gap-0 overflow-y-auto flex-grow"):
-                if not employees:
-                    with ui.column().classes("w-full items-center py-12 px-4"):
-                        ui.icon("group_add", size="lg").classes("text-slate-300 mb-2")
-                        ui.label("No team members yet").classes("text-slate-400 text-sm mb-3")
-                        ui.button("Open Position", icon="person_add",
-                                  on_click=lambda: vacancy_dialog.open()) \
-                            .props("unelevated no-caps color=primary")
-                else:
+            if not employees:
+                # Empty state
+                with ui.column().classes("w-full items-center py-20"):
+                    ui.icon("groups", size="xl").classes("text-slate-200 mb-4")
+                    ui.label("No team members yet").classes("text-xl text-slate-400 mb-2")
+                    ui.label("Hire your first AI employee to get started") \
+                        .classes("text-sm text-slate-400 mb-6")
+                    ui.button("Hire New Member", icon="person_add",
+                              on_click=lambda: vacancy_dialog.open()) \
+                        .props("unelevated no-caps color=primary size=lg")
+            elif selected_id:
+                _render_employee_detail(selected_id, employees, vacancy_dialog)
+            else:
+                # Employee card grid
+                with ui.row().classes("w-full gap-4 flex-wrap"):
                     for emp in employees:
-                        _render_sidebar_employee(emp, selected_id)
+                        _render_employee_card(emp)
 
-            # Bottom — user info
-            with ui.column().classes("px-4 py-3 border-t border-slate-200 flex-shrink-0"):
-                tier_name = TIER_NAMES.get(user.tier, "Free")
-                with ui.row().classes("items-center gap-2 text-xs text-slate-500"):
-                    ui.icon("account_circle", size="xs")
-                    ui.label(user.email).classes("truncate")
-                with ui.row().classes("items-center gap-2 text-xs text-slate-500 mt-1"):
-                    ui.label(tier_name).classes("font-medium")
-                    ui.label("·")
-                    if user.tier == TIER_FOUNDER:
-                        ui.html('<span class="font-bold" style="color: #1DE0C8;">&infin;</span> credits')
-                    else:
-                        ui.label(f"{user.credits} credits")
-
-        # ════════════════════════════════
-        # RIGHT PANEL
-        # ════════════════════════════════
-        with ui.column().classes("flex-grow gap-0").style("height: 100vh; overflow: hidden; min-width: 0"):
-
-            # Top navbar
-            with ui.row().classes(
-                "w-full items-center justify-between px-6 bg-white border-b border-slate-200 flex-shrink-0"
-            ).style("height: 56px; min-height: 56px"):
-
-                with ui.row().classes("items-center gap-2"):
-                    nav_items = [
-                        ("/agents-dashboard", "Agents", "smart_toy"),
-                        ("/team", "Team", "badge"),
-                        ("/monitoring", "Monitoring", "monitor_heart"),
-                        ("/account-settings", "Settings", "settings"),
-                    ]
-                    for path, label, icon in nav_items:
-                        with ui.link(target=path).classes("no-underline"):
-                            btn = ui.button(label, icon=icon).props("flat dense no-caps")
-                            if current_path == path:
-                                btn.style("border-bottom: 2px solid #1DE0C8; border-radius: 0")
-
-                with ui.row().classes("items-center gap-4"):
-                    tier_name = TIER_NAMES.get(user.tier, "Free")
-                    with ui.row().classes("items-center gap-2 text-sm"):
-                        ui.label(tier_name).classes("text-slate-600 font-medium")
-                        ui.separator().props("vertical inset")
-                        with ui.row().classes("items-center gap-1"):
-                            ui.label("Credits:").classes("text-slate-600")
-                            if user.tier == TIER_FOUNDER:
-                                ui.html('<span class="font-bold text-xl" style="color: #1DE0C8;">&infin;</span>')
-                            else:
-                                ui.label(str(user.credits)).classes("text-slate-600")
-
-                    if user.tier == TIER_FREE:
-                        with ui.link(target="/account-settings?tab=subscriptions").classes("no-underline"):
-                            ui.button("Upgrade", color="primary").props("dense unelevated")
-
-                    with ui.link(target="/auth/logout").classes("no-underline"):
-                        ui.button("Logout", icon="logout", color="primary").props("flat dense")
-
-            # Detail panel
-            with ui.column().classes("flex-grow overflow-y-auto p-6 bg-white"):
-                if selected_id:
-                    _render_employee_detail(selected_id, employees)
-                else:
-                    with ui.column().classes("w-full h-full items-center justify-center"):
-                        ui.icon("badge", size="xl").classes("text-slate-200 mb-4")
-                        ui.label("Open a position to hire your first team member") \
-                            .classes("text-xl text-slate-400 text-center")
-                        ui.button("Open Position", icon="person_add",
-                                  on_click=lambda: vacancy_dialog.open()) \
-                            .props("unelevated no-caps color=primary size=lg").classes("mt-4")
-
-    return None
+    return default_layout.render(content, request)
 
 
 # ---------------------------------------------------------------------------
-# Sidebar employee item
+# Employee card (grid view)
 # ---------------------------------------------------------------------------
 
-def _render_sidebar_employee(emp: dict, selected_id: str):
-    """Render a single employee in the sidebar."""
+def _render_employee_card(emp: dict):
+    """Render an employee as a clickable card."""
     eid = emp.get("id", "")
     status = emp.get("status", "active")
     color = STATUS_COLORS.get(status, "#94a3b8")
-    is_selected = eid == selected_id
 
-    bg = "bg-teal-50" if is_selected else "hover:bg-slate-100"
-    border = "border-l-[3px] border-teal-500" if is_selected else "border-l-[3px] border-transparent"
+    with ui.card().classes(
+        "p-4 cursor-pointer hover:shadow-lg transition-all border border-slate-100"
+    ).style("width: 280px").on("click", lambda e=eid: ui.navigate.to(f"/team?employee={e}")):
+        with ui.row().classes("items-center gap-3 mb-3"):
+            ui.label(emp.get("avatar_emoji", "🤖")).classes("text-3xl")
+            with ui.column().classes("gap-0 min-w-0"):
+                ui.label(emp.get("name", "Unknown")).classes("text-sm font-bold text-slate-800 truncate")
+                ui.label(emp.get("title", "")).classes("text-xs text-slate-500 truncate")
 
-    def select_emp(e=eid):
-        ui.navigate.to(f"/team?employee={e}")
+        with ui.row().classes("items-center gap-2 mb-3"):
+            ui.html(f'<div style="width:8px;height:8px;border-radius:50%;background:{color}"></div>')
+            ui.label(status.capitalize()).classes("text-xs text-slate-500")
 
-    with ui.element("div").classes(f"w-full cursor-pointer {bg} {border} py-2.5 px-3") \
-            .on("click", select_emp):
-        with ui.row().classes("items-center gap-3 w-full flex-nowrap"):
-            # Avatar emoji
-            ui.label(emp.get("avatar_emoji", "🤖")).classes("text-2xl flex-shrink-0")
-            with ui.column().classes("gap-0 min-w-0 flex-grow overflow-hidden"):
-                ui.label(emp.get("name", "Unknown")).classes("text-sm font-medium text-slate-800 truncate")
-                with ui.row().classes("items-center gap-1"):
-                    ui.html(f'<div style="width:6px;height:6px;border-radius:50%;background:{color};flex-shrink:0"></div>')
-                    ui.label(emp.get("title", "")).classes("text-xs text-slate-400 truncate")
+        strengths = emp.get("strengths", [])
+        if strengths:
+            with ui.row().classes("gap-1 flex-wrap"):
+                for s in strengths[:3]:
+                    ui.badge(s).props("outline").classes("text-teal-600").style("font-size: 10px")
 
 
 # ---------------------------------------------------------------------------
 # Employee detail panel
 # ---------------------------------------------------------------------------
 
-def _render_employee_detail(employee_id: str, employees: list[dict]):
-    """Render full detail panel for a selected employee."""
+def _render_employee_detail(employee_id: str, employees: list[dict], vacancy_dialog):
+    """Render full detail for a selected employee."""
     emp = None
     for e in employees:
         if e.get("id") == employee_id:
@@ -362,6 +318,11 @@ def _render_employee_detail(employee_id: str, employees: list[dict]):
     status = emp.get("status", "active")
     color = STATUS_COLORS.get(status, "#94a3b8")
     spec = emp.get("spec", {})
+
+    # Back link
+    ui.button("Back to Team", icon="arrow_back",
+              on_click=lambda: ui.navigate.to("/team")) \
+        .props("flat no-caps dense").classes("mb-4 text-slate-500")
 
     # Header
     with ui.row().classes("w-full items-start justify-between mb-6"):
@@ -473,29 +434,68 @@ def _render_employee_detail(employee_id: str, employees: list[dict]):
 
 
 # ---------------------------------------------------------------------------
-# Vacancy / Hiring dialog
+# Vacancy / Hiring dialog — with pre-defined role templates
 # ---------------------------------------------------------------------------
 
 def _build_vacancy_dialog():
-    """Build a multi-step dialog for vacancy creation. Returns the dialog (call .open() to show)."""
+    """Build a multi-step dialog: role templates -> describe -> candidates -> onboard."""
 
     dialog = ui.dialog().props("persistent")
     vacancy_text = {"value": ""}
     candidates_data = {"value": []}
     selected_candidate = {"value": None}
     selected_bundles = {"value": set()}
-    # Track which step we're on: 1=describe, 2=candidates, 3=onboard
-    current_step = {"value": 1}
 
     with dialog:
         with ui.card().style("width: 800px; max-width: 90vw; max-height: 90vh; overflow-y: auto"):
             # Header
             with ui.row().classes("w-full items-center justify-between px-6 py-4 border-b border-slate-200"):
-                dialog_title = ui.label("Step 1: Describe the Position").classes("text-xl font-bold text-slate-800")
+                dialog_title = ui.label("Choose a Role").classes("text-xl font-bold text-slate-800")
                 ui.button(icon="close", on_click=dialog.close).props("flat round dense")
+
+            # ── Step 0: Role templates ──
+            step0 = ui.column().classes("w-full px-6 py-4 gap-4")
+            with step0:
+                ui.label(
+                    "Pick a pre-defined role or create a custom position."
+                ).classes("text-sm text-slate-600")
+
+                with ui.grid(columns=2).classes("w-full gap-3"):
+                    for tmpl in ROLE_TEMPLATES:
+                        def make_select_role(t=tmpl):
+                            def select():
+                                vacancy_text["value"] = t["vacancy_text"]
+                                selected_bundles["value"] = set(t.get("suggested_bundles", []))
+                                vacancy_input.value = t["vacancy_text"]
+                                step0.set_visibility(False)
+                                step1.set_visibility(True)
+                                dialog_title.set_text("Describe the Position")
+                            return select
+
+                        with ui.card().classes(
+                            "p-4 cursor-pointer border-2 border-transparent "
+                            "hover:border-teal-300 hover:shadow-md transition-all"
+                        ).on("click", make_select_role()):
+                            ui.label(tmpl["emoji"]).classes("text-3xl mb-2")
+                            ui.label(tmpl["title"]).classes("text-sm font-bold text-slate-800")
+                            ui.label(tmpl["description"]).classes("text-xs text-slate-500")
+
+                # Custom role button
+                with ui.row().classes("w-full justify-center mt-2"):
+                    def go_custom():
+                        vacancy_input.value = ""
+                        vacancy_text["value"] = ""
+                        step0.set_visibility(False)
+                        step1.set_visibility(True)
+                        dialog_title.set_text("Describe the Position")
+
+                    ui.button("Custom Role", icon="edit",
+                              on_click=go_custom) \
+                        .props("flat no-caps").classes("text-slate-500")
 
             # ── Step 1: Describe position ──
             step1 = ui.column().classes("w-full px-6 py-4 gap-4")
+            step1.set_visibility(False)
             with step1:
                 ui.label(
                     "Describe the role you need filled. What should this employee do? "
@@ -508,7 +508,15 @@ def _build_vacancy_dialog():
                                 "and produce weekly analysis reports...",
                 ).classes("w-full").props("outlined autogrow rows=6")
 
-                with ui.row().classes("w-full justify-end gap-2"):
+                with ui.row().classes("w-full justify-between gap-2"):
+                    def back_to_roles():
+                        step0.set_visibility(True)
+                        step1.set_visibility(False)
+                        dialog_title.set_text("Choose a Role")
+
+                    ui.button("Back", icon="arrow_back", on_click=back_to_roles) \
+                        .props("flat no-caps")
+
                     generating_spinner = ui.spinner(size="sm").classes("hidden")
 
                     async def generate_and_next():
@@ -529,7 +537,7 @@ def _build_vacancy_dialog():
                         step1.set_visibility(False)
                         step2.set_visibility(True)
                         step3.set_visibility(False)
-                        dialog_title.set_text("Step 2: Review Candidates")
+                        dialog_title.set_text("Review Candidates")
 
                     ui.button("Generate Candidates", icon="auto_awesome",
                               on_click=generate_and_next) \
@@ -551,7 +559,7 @@ def _build_vacancy_dialog():
                         step1.set_visibility(True)
                         step2.set_visibility(False)
                         step3.set_visibility(False)
-                        dialog_title.set_text("Step 1: Describe the Position")
+                        dialog_title.set_text("Describe the Position")
 
                     ui.button("Back", icon="arrow_back", on_click=back_to_step1) \
                         .props("flat no-caps")
@@ -567,7 +575,7 @@ def _build_vacancy_dialog():
                         step1.set_visibility(False)
                         step2.set_visibility(False)
                         step3.set_visibility(True)
-                        dialog_title.set_text("Step 3: Onboard")
+                        dialog_title.set_text("Onboard")
 
                     ui.button("Proceed to Onboarding", icon="arrow_forward",
                               on_click=proceed_to_onboard) \
@@ -588,7 +596,7 @@ def _build_vacancy_dialog():
                         step1.set_visibility(False)
                         step2.set_visibility(True)
                         step3.set_visibility(False)
-                        dialog_title.set_text("Step 2: Review Candidates")
+                        dialog_title.set_text("Review Candidates")
 
                     ui.button("Back", icon="arrow_back", on_click=back_to_step2) \
                         .props("flat no-caps")
