@@ -9,7 +9,7 @@ from typing import Optional
 _PATCHED = False
 _BRAND_STYLE = ""
 
-PRIMARY = "#4338CA"  # Indigo-700 — Auton brand color (matches logo)
+PRIMARY = "#16203C"  # Dark navy — Auton brand color (matches logo #11)
 
 
 def _build_css(

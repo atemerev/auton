@@ -167,7 +167,7 @@ def render_account_settings(request: Request) -> Optional[Response]:
                             with ui.row().classes("items-center gap-2"):
                                 ui.label("Credits:")
                                 if current_tier == TIER_FOUNDER:
-                                    ui.html('<span class="font-bold text-xl" style="color: #4338CA;">∞</span>')
+                                    ui.html('<span class="font-bold text-xl" style="color: #1DE0C8;">∞</span>')
                                 else:
                                     ui.label(str(current_credits))
 

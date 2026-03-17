@@ -44,6 +44,7 @@ def init_dashboard(fastapi_app):
     from .pages.agents import render_agents_dashboard
     from .pages.monitoring import render_monitoring
     from .pages.account_settings import render_account_settings
+    from .pages.team import render_team_dashboard
 
     # --- Page routes ---
 
@@ -70,6 +71,10 @@ def init_dashboard(fastapi_app):
     @ui.page("/agents-dashboard")
     def agents_page(request: Request):
         return render_agents_dashboard(request)
+
+    @ui.page("/team")
+    def team_page(request: Request):
+        return render_team_dashboard(request)
 
     @ui.page("/monitoring")
     def monitoring_page(request: Request):

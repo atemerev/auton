@@ -173,6 +173,30 @@ class ArtifactRecord(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# ---------------------------------------------------------------------------
+# Employee profile (persistent agent-as-employee)
+# ---------------------------------------------------------------------------
+
+
+class EmployeeProfile(BaseModel):
+    """Persistent agent identity with personality, role, and tool configuration.
+
+    Wraps an AgentSpec with HR-metaphor metadata: the employee persists across
+    sessions and can be assigned tasks repeatedly.
+    """
+    id: str
+    name: str                          # generated human name, e.g. "Alex Chen"
+    title: str                         # role title, e.g. "Marketing Research Analyst"
+    personality: str                   # brief personality description
+    strengths: list[str] = Field(default_factory=list)
+    avatar_emoji: str = "🤖"
+    status: str = "active"             # active | suspended | archived
+    tool_bundles: list[str] = Field(default_factory=list)  # bundle keys
+    spec: AgentSpec                    # underlying agent specification
+    hired_at: str = ""                 # ISO timestamp
+    last_active: str | None = None
+
+
 class SpawnRequest(BaseModel):
     """Request to spawn a new agent. Provide either a full spec or a template name + overrides."""
     id: str | None = None

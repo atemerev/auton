@@ -48,6 +48,14 @@ class Database:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS employees (
+                id TEXT PRIMARY KEY,
+                profile_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS artifacts (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -309,6 +317,82 @@ class Database:
             (status, now, artifact_id),
         )
         await self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Employees
+    # ------------------------------------------------------------------
+
+    async def save_employee(self, profile_data: dict) -> None:
+        """Upsert an employee profile."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._conn.execute(
+            """INSERT OR REPLACE INTO employees
+               (id, profile_json, status, created_at, updated_at)
+               VALUES (?, ?, ?, COALESCE(
+                   (SELECT created_at FROM employees WHERE id = ?), ?
+               ), ?)""",
+            (
+                profile_data["id"],
+                json.dumps(profile_data),
+                profile_data.get("status", "active"),
+                profile_data["id"],
+                now,
+                now,
+            ),
+        )
+        await self._conn.commit()
+
+    async def load_employees(self, status: str | None = None) -> list[dict]:
+        """Load employee profiles, optionally filtered by status."""
+        if status:
+            cursor = await self._conn.execute(
+                "SELECT profile_json FROM employees WHERE status = ? ORDER BY created_at DESC",
+                (status,),
+            )
+        else:
+            cursor = await self._conn.execute(
+                "SELECT profile_json FROM employees ORDER BY created_at DESC"
+            )
+        rows = await cursor.fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    async def get_employee(self, employee_id: str) -> dict | None:
+        """Get a single employee by ID."""
+        cursor = await self._conn.execute(
+            "SELECT profile_json FROM employees WHERE id = ?",
+            (employee_id,),
+        )
+        row = await cursor.fetchone()
+        return json.loads(row[0]) if row else None
+
+    async def update_employee_status(self, employee_id: str, status: str) -> None:
+        """Update employee status (active/suspended/archived)."""
+        now = datetime.now(timezone.utc).isoformat()
+        # Also update status inside the profile JSON
+        cursor = await self._conn.execute(
+            "SELECT profile_json FROM employees WHERE id = ?", (employee_id,)
+        )
+        row = await cursor.fetchone()
+        if row:
+            profile = json.loads(row[0])
+            profile["status"] = status
+            await self._conn.execute(
+                "UPDATE employees SET profile_json = ?, status = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(profile), status, now, employee_id),
+            )
+            await self._conn.commit()
+
+    async def delete_employee(self, employee_id: str) -> bool:
+        """Delete an employee. Returns True if deleted."""
+        cursor = await self._conn.execute(
+            "DELETE FROM employees WHERE id = ?", (employee_id,)
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Artifacts
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _row_to_artifact(row) -> dict:

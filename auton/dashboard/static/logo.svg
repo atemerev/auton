@@ -1,11 +1,36 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 160" fill="none">
   <title>Auton</title>
-  <desc>Logo for the Auton agent control plane.</desc>
-  <path fill-rule="evenodd"
-    d="M72 8 L142 152 H2 Z M72 78 a22 22 0 1 0 0 44 a22 22 0 1 0 0-44 Z"
-    fill="#4338CA"/>
-  <text x="170" y="100"
-    font-family="SF Pro Display, Inter, Segoe UI, system-ui, sans-serif"
-    font-size="56" font-weight="700" letter-spacing="4"
-    fill="#1E1B4B">AUTON</text>
+  <desc>Logo for the Auton agent runtime.</desc>
+  <!-- Concentric rings mark -->
+  <g transform="translate(80,80)">
+    <circle r="58" stroke="#16203C" stroke-width="3" fill="none"/>
+    <circle r="42" stroke="#16203C" stroke-width="2.5" fill="none"/>
+    <circle r="26" stroke="#16203C" stroke-width="2" fill="none"/>
+    <circle r="10" fill="#16203C"/>
+    <!-- Orbital nodes -->
+    <circle cx="0" cy="-58" r="5" fill="#1DE0C8"/>
+    <circle cx="42" cy="0" r="4" fill="#16203C"/>
+    <circle cx="-30" cy="30" r="4" fill="#16203C"/>
+    <circle cx="20" cy="-38" r="3.5" fill="#16203C"/>
+    <circle cx="-42" cy="-5" r="3.5" fill="#16203C"/>
+    <circle cx="55" cy="20" r="3" fill="#16203C"/>
+    <circle cx="-15" cy="55" r="3" fill="#16203C"/>
+    <circle cx="25" cy="50" r="2.5" fill="#16203C"/>
+    <!-- Connector lines -->
+    <line x1="0" y1="-58" x2="0" y2="-26" stroke="#16203C" stroke-width="1" opacity="0.4"/>
+    <line x1="42" y1="0" x2="26" y2="0" stroke="#16203C" stroke-width="1" opacity="0.4"/>
+  </g>
+  <!-- AUTON as paths — no font dependency -->
+  <g fill="#16203C" transform="translate(170, 60)">
+    <!-- A -->
+    <path d="M0 56L20 0h8l20 56h-9l-5-15H14l-5 15H0zm16.5-22h15L24 12.5 16.5 34z"/>
+    <!-- U -->
+    <path d="M60 0h8v34c0 8.5 4.5 14 13 14s13-5.5 13-14V0h8v35c0 13-8.5 23-21 23s-21-10-21-23V0z"/>
+    <!-- T -->
+    <path d="M115 0h36v7h-14v49h-8V7h-14V0z"/>
+    <!-- O -->
+    <path d="M180 -1c14 0 23 12 23 29.5S194 58 180 58s-23-12-23-29.5S166-1 180-1zm0 7.5c-9 0-15 9-15 22s6 22 15 22 15-9 15-22-6-22-15-22z"/>
+    <!-- N -->
+    <path d="M215 0h8l24 42V0h8v56h-8l-24-42v42h-8V0z"/>
+  </g>
 </svg>

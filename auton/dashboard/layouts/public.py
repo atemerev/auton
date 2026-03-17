@@ -12,7 +12,9 @@ def render(content: Callable, footer: Optional[Callable] = None) -> None:
 
     with ui.column().classes("w-full min-h-screen items-center pt-20"):
         with ui.card().classes("w-full max-w-md mx-auto p-8 text-center"):
-            ui.image(f"/static/dashboard/logo.svg?v={_LOGO_VERSION}").classes("w-full max-w-[280px] h-auto mx-auto mb-6")
+            with ui.row().classes("items-center justify-center gap-3 mx-auto mb-6"):
+                ui.image(f"/static/dashboard/logo-mark-nobg.png?v={_LOGO_VERSION}").classes("w-16 h-16")
+                ui.label("AUTON").classes("text-3xl font-bold").style("color: #16203C; letter-spacing: 0.1em")
             content()
 
         if footer:

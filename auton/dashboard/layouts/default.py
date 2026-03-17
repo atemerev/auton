@@ -23,7 +23,7 @@ def render(content: Callable, request: Request) -> Optional[Response]:
     with ui.header().classes("bg-white justify-between text-slate-800 items-center"):
         with ui.row().classes("items-center gap-6"):
             with ui.link(target="/"):
-                ui.label("AUTON").classes("text-xl font-bold text-indigo-700")
+                ui.label("AUTON").classes("text-xl font-bold").style("color: #16203C")
 
             with ui.row().classes("items-center gap-2"):
                 nav_items = [
@@ -35,7 +35,7 @@ def render(content: Callable, request: Request) -> Optional[Response]:
                     with ui.link(target=path).classes("no-underline"):
                         btn = ui.button(label, icon=icon).props("flat dense no-caps")
                         if current_path == path:
-                            btn.style("border-bottom: 2px solid #4338CA; border-radius: 0")
+                            btn.style("border-bottom: 2px solid #1DE0C8; border-radius: 0")
 
         with ui.row().classes("items-center gap-4"):
             current_tier = user.tier
@@ -48,7 +48,7 @@ def render(content: Callable, request: Request) -> Optional[Response]:
                 with ui.row().classes("items-center gap-1"):
                     ui.label("Credits:").classes("text-slate-600")
                     if current_tier == TIER_FOUNDER:
-                        ui.html('<span class="font-bold text-xl" style="color: #4338CA;">∞</span>')
+                        ui.html('<span class="font-bold text-xl" style="color: #1DE0C8;">∞</span>')
                     else:
                         ui.label(str(current_credits)).classes("text-slate-600")
 

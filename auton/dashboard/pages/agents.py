@@ -103,7 +103,7 @@ def render_agents_dashboard(request: Request) -> Optional[Response]:
             with ui.row().classes("items-center gap-3 px-5 py-4 border-b border-slate-200"):
                 with ui.link(target="/").classes("no-underline flex items-center gap-2"):
                     ui.image("/static/dashboard/favicon.svg").classes("w-7 h-7")
-                    ui.label("AUTON").classes("text-xl font-bold text-indigo-700")
+                    ui.label("AUTON").classes("text-xl font-bold").style("color: #16203C")
 
             # Sessions label + refresh
             with ui.row().classes("w-full justify-between items-center px-4 py-2 border-b border-slate-100"):
@@ -132,7 +132,7 @@ def render_agents_dashboard(request: Request) -> Optional[Response]:
                     ui.label(tier_name).classes("font-medium")
                     ui.label("·")
                     if user.tier == TIER_FOUNDER:
-                        ui.html('<span class="font-bold" style="color: #4338CA;">&infin;</span> credits')
+                        ui.html('<span class="font-bold" style="color: #1DE0C8;">&infin;</span> credits')
                     else:
                         ui.label(f"{credits} credits")
 
@@ -149,6 +149,7 @@ def render_agents_dashboard(request: Request) -> Optional[Response]:
                 with ui.row().classes("items-center gap-2"):
                     nav_items = [
                         ("/agents-dashboard", "Agents", "smart_toy"),
+                        ("/team", "Team", "badge"),
                         ("/monitoring", "Monitoring", "monitor_heart"),
                         ("/account-settings", "Settings", "settings"),
                     ]
@@ -156,7 +157,7 @@ def render_agents_dashboard(request: Request) -> Optional[Response]:
                         with ui.link(target=path).classes("no-underline"):
                             btn = ui.button(label, icon=icon).props("flat dense no-caps")
                             if current_path == path:
-                                btn.style("border-bottom: 2px solid #4338CA; border-radius: 0")
+                                btn.style("border-bottom: 2px solid #1DE0C8; border-radius: 0")
 
                 with ui.row().classes("items-center gap-4"):
                     tier_name = TIER_NAMES.get(user.tier, "Free")
@@ -166,7 +167,7 @@ def render_agents_dashboard(request: Request) -> Optional[Response]:
                         with ui.row().classes("items-center gap-1"):
                             ui.label("Credits:").classes("text-slate-600")
                             if user.tier == TIER_FOUNDER:
-                                ui.html('<span class="font-bold text-xl" style="color: #4338CA;">&infin;</span>')
+                                ui.html('<span class="font-bold text-xl" style="color: #1DE0C8;">&infin;</span>')
                             else:
                                 ui.label(str(user.credits)).classes("text-slate-600")
 
@@ -199,8 +200,8 @@ def _render_sidebar_item(agent: dict, selected_path: str, depth: int = 0):
     color = STATE_COLORS.get(state, "#94a3b8")
     is_selected = path == selected_path
 
-    bg = "bg-indigo-50" if is_selected else "hover:bg-slate-100"
-    border = "border-l-[3px] border-indigo-700" if is_selected else "border-l-[3px] border-transparent"
+    bg = "bg-teal-50" if is_selected else "hover:bg-slate-100"
+    border = "border-l-[3px] border-teal-500" if is_selected else "border-l-[3px] border-transparent"
     pl = 12 + depth * 12
 
     def select_agent(p=path):
