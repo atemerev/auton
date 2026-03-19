@@ -42,7 +42,6 @@ def init_dashboard(fastapi_app):
     from .pages.welcome import render_welcome
     from .pages.forgot_password import render_forgot_password
     from .pages.agents import render_agents_dashboard
-    from .pages.monitoring import render_monitoring
     from .pages.account_settings import render_account_settings
     from .pages.team import render_team_dashboard
 
@@ -75,10 +74,6 @@ def init_dashboard(fastapi_app):
     @ui.page("/team")
     def team_page(request: Request):
         return render_team_dashboard(request)
-
-    @ui.page("/monitoring")
-    def monitoring_page(request: Request):
-        return render_monitoring(request)
 
     @ui.page("/account-settings", reconnect_timeout=0)
     def account_settings_page(request: Request):

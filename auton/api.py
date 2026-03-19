@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI):
     register_tool(fetch_webpage)
     logger.info("Tools registered: web_search, fetch_webpage")
 
-    # Initialize database
+    # Initialize database (PostgreSQL)
     db = Database()
     await db.init()
 
@@ -163,7 +163,7 @@ except Exception as e:
     logger.warning("Dashboard init failed: %s", e)
 
 
-@app.get("/health")
+@app.get("/api/health")
 async def health():
     """Service health check. No authentication required."""
     agent_count = sum(1 for _ in registry._roots.values())
@@ -200,13 +200,13 @@ def _publish_event(path: str, event: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/agents")
+@app.get("/api/agents")
 async def list_agents():
     """Full agent tree."""
     return {"agents": registry.list_all()}
 
 
-@app.get("/agents/{path:path}")
+@app.get("/api/agents/{path:path}")
 async def get_agent(path: str):
     """Subtree at path."""
     # Strip trailing slashes, handle special sub-paths
@@ -257,7 +257,7 @@ async def get_agent(path: str):
 # ---------------------------------------------------------------------------
 
 
-@app.post("/agents")
+@app.post("/api/agents")
 async def spawn_root_agent(req: SpawnRequest):
     """Spawn a root agent. Provide spec directly or reference a template."""
     resolved = await _resolve_spec(req)
@@ -289,7 +289,7 @@ async def _resolve_spec(req: SpawnRequest) -> AgentSpec:
     raise _error(422, "Either 'spec' or 'template' must be provided")
 
 
-@app.post("/agents/{parent_path:path}")
+@app.post("/api/agents/{parent_path:path}")
 async def spawn_or_action(parent_path: str, request: Request):
     """Spawn under parent, or dispatch to sub-actions (checkpoint, fork, etc.)."""
     parent_path = parent_path.strip("/")
@@ -330,7 +330,7 @@ async def spawn_or_action(parent_path: str, request: Request):
 # ---------------------------------------------------------------------------
 
 
-@app.delete("/agents/{path:path}")
+@app.delete("/api/agents/{path:path}")
 async def terminate_agent(path: str):
     """Terminate an agent (cascades to children)."""
     path = path.strip("/")
@@ -349,7 +349,7 @@ async def terminate_agent(path: str):
 # ---------------------------------------------------------------------------
 
 
-@app.patch("/agents/{path:path}")
+@app.patch("/api/agents/{path:path}")
 async def correct_agent(path: str, req: CorrectionRequest):
     """Inject guidance into a running agent."""
     path = path.strip("/")
@@ -441,7 +441,7 @@ async def message_agent(path: str, body: dict):
 # ---------------------------------------------------------------------------
 
 
-@app.get("/agents/{path:path}/observe")
+@app.get("/api/agents/{path:path}/observe")
 async def observe_agent(path: str, request: Request):
     """SSE stream of health events for an agent."""
     path = path.strip("/")
@@ -489,7 +489,7 @@ async def observe_agent(path: str, request: Request):
     return EventSourceResponse(event_generator())
 
 
-@app.get("/agents/{path:path}/log")
+@app.get("/api/agents/{path:path}/log")
 async def stream_log(path: str, request: Request):
     """SSE stream of the agent's event log."""
     path = path.strip("/")
@@ -533,7 +533,7 @@ async def stream_log(path: str, request: Request):
 # ---------------------------------------------------------------------------
 
 
-@app.post("/oversight/check")
+@app.post("/api/oversight/check")
 async def run_oversight():
     """Manually trigger oversight checks on all agents."""
     events = oversight.check_all()
@@ -555,7 +555,7 @@ async def _rollout_redirect(path: str):
     return await stream_rollout(path, None)
 
 
-@app.get("/agents/{path:path}/rollout")
+@app.get("/api/agents/{path:path}/rollout")
 async def stream_rollout(path: str, request: Request):
     """SSE stream of the agent's LLM conversation — tool calls, results, responses."""
     path = path.strip("/")
@@ -603,7 +603,7 @@ async def stream_rollout(path: str, request: Request):
 # ---------------------------------------------------------------------------
 
 
-@app.get("/artifacts")
+@app.get("/api/artifacts")
 async def list_artifacts(
     agent_id: str | None = None,
     status: str | None = None,
@@ -619,7 +619,7 @@ async def list_artifacts(
     return {"artifacts": artifacts, "count": len(artifacts)}
 
 
-@app.get("/artifacts/{artifact_id}")
+@app.get("/api/artifacts/{artifact_id}")
 async def get_artifact(artifact_id: str):
     """Get artifact metadata by ID."""
     if not registry.db:
@@ -630,7 +630,7 @@ async def get_artifact(artifact_id: str):
     return artifact
 
 
-@app.get("/artifacts/{artifact_id}/content")
+@app.get("/api/artifacts/{artifact_id}/content")
 async def get_artifact_content(artifact_id: str):
     """Serve the actual file content of an artifact."""
     if not registry.db:
@@ -643,7 +643,10 @@ async def get_artifact_content(artifact_id: str):
     from fastapi.responses import FileResponse
     from .workspace import get_workspace_path
 
-    ws = get_workspace_path(artifact["agent_id"])
+    # Resolve workspace — check if agent has a user_id for per-user workspace
+    agent_node = registry.resolve(artifact.get("agent_path", ""))
+    uid = agent_node.user_id if agent_node else None
+    ws = get_workspace_path(artifact["agent_id"], uid)
     file_path = ws / artifact["file_path"]
     if not file_path.exists():
         raise _error(404, f"Artifact file not found on disk: {artifact['file_path']}")
@@ -664,7 +667,7 @@ class TemplateRequest(BaseModel):
     description: str = ""
 
 
-@app.get("/specs")
+@app.get("/api/specs")
 async def list_templates():
     """List all available spec templates."""
     if not registry.db:
@@ -673,7 +676,7 @@ async def list_templates():
     return {"templates": templates}
 
 
-@app.get("/specs/{name}")
+@app.get("/api/specs/{name}")
 async def get_template(name: str):
     """Get a spec template by name."""
     if not registry.db:
@@ -684,7 +687,7 @@ async def get_template(name: str):
     return tmpl
 
 
-@app.post("/specs/{name}")
+@app.post("/api/specs/{name}")
 async def save_template(name: str, req: TemplateRequest):
     """Create or update a spec template."""
     if not registry.db:
@@ -698,7 +701,7 @@ async def save_template(name: str, req: TemplateRequest):
     return {"status": "saved", "name": name}
 
 
-@app.delete("/specs/{name}")
+@app.delete("/api/specs/{name}")
 async def delete_template(name: str):
     """Delete a spec template."""
     if not registry.db:

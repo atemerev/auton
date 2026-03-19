@@ -1,0 +1,11 @@
+FROM docker.io/library/alpine:3.21
+
+RUN apk add --no-cache \
+    bash coreutils findutils grep sed gawk \
+    curl wget git openssh-client \
+    python3 py3-pip \
+    nodejs npm \
+    build-base
+
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

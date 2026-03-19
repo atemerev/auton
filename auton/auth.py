@@ -16,7 +16,7 @@ from starlette.responses import JSONResponse
 logger = logging.getLogger(__name__)
 
 # Paths that never require authentication
-PUBLIC_PATHS = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
+PUBLIC_PATHS = frozenset({"/api/health", "/health", "/docs", "/openapi.json", "/redoc"})
 
 
 def get_valid_keys() -> set[str]:

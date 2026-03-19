@@ -29,7 +29,6 @@ def render(content: Callable, request: Request) -> Optional[Response]:
                 nav_items = [
                     ("/agents-dashboard", "Agents", "smart_toy"),
                     ("/team", "Team", "groups"),
-                    ("/monitoring", "Monitoring", "monitor_heart"),
                     ("/account-settings", "Settings", "settings"),
                 ]
                 for path, label, icon in nav_items:

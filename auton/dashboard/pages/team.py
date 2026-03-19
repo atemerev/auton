@@ -154,55 +154,158 @@ STATUS_LABELS = {
 }
 
 # ---------------------------------------------------------------------------
-# Face generation via Recraft API
+# OpenRouter top models (cached)
+# ---------------------------------------------------------------------------
+
+_MODEL_CACHE: dict = {"models": [], "fetched_at": 0}
+_TOP_PROVIDERS = {"anthropic", "openai", "google", "deepseek", "mistralai", "x-ai", "meta-llama"}
+
+
+def _fetch_top_models() -> list[dict]:
+    """Fetch and cache top LLM models from OpenRouter. Returns list of {id, name, ctx, price}."""
+    import time
+    now = time.time()
+    if _MODEL_CACHE["models"] and now - _MODEL_CACHE["fetched_at"] < 3600:
+        return _MODEL_CACHE["models"]
+
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        return []
+
+    try:
+        import httpx as _httpx
+        resp = _httpx.get(
+            "https://openrouter.ai/api/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return _MODEL_CACHE["models"]
+
+        data = resp.json()
+        results = []
+        seen = set()
+        # Only include flagship models worth offering as agent backends
+        _CURATED = {
+            "anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6",
+            "anthropic/claude-opus-4.5", "anthropic/claude-sonnet-4.5",
+            "anthropic/claude-haiku-4.5",
+            "anthropic/claude-sonnet-4", "anthropic/claude-opus-4",
+            "openai/gpt-5", "openai/gpt-5-mini",
+            "openai/gpt-4.1", "openai/gpt-4.1-mini",
+            "google/gemini-2.5-pro", "google/gemini-2.5-flash",
+            "google/gemini-3-pro-preview", "google/gemini-3-flash-preview",
+            "deepseek/deepseek-r1", "deepseek/deepseek-v3.2",
+            "x-ai/grok-4", "x-ai/grok-3",
+            "meta-llama/llama-4-maverick",
+            "mistralai/mistral-large",
+        }
+        for m in data.get("data", []):
+            mid = m.get("id", "")
+            if mid not in _CURATED:
+                continue
+            arch = m.get("architecture", {})
+            if "text" not in arch.get("output_modalities", []):
+                continue
+            price = float(m.get("pricing", {}).get("prompt", "0"))
+            ctx = m.get("context_length", 0)
+            results.append({
+                "id": f"openrouter/{mid}",
+                "name": m.get("name", mid),
+                "ctx": ctx,
+                "price": price,
+            })
+
+        results.sort(key=lambda x: (x["id"].split("/")[1], -x["ctx"]))
+        _MODEL_CACHE["models"] = results
+        _MODEL_CACHE["fetched_at"] = now
+        return results
+    except Exception as e:
+        logger.warning(f"Failed to fetch OpenRouter models: {e}")
+        return _MODEL_CACHE["models"]
+
+
+# ---------------------------------------------------------------------------
+# Face generation via OpenRouter (Gemini image model)
 # ---------------------------------------------------------------------------
 
 FACES_DIR = Path(__file__).parent.parent / "static" / "faces"
-RECRAFT_API_KEY = os.environ.get("RECRAFT_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+FACE_MODEL = os.environ.get("AUTON_FACE_MODEL", "google/gemini-2.5-flash-image")
 
 
-async def _generate_face(name: str, title: str, candidate_id: str) -> str | None:
-    """Generate a professional illustrated portrait using Recraft API."""
-    if not RECRAFT_API_KEY:
-        logger.warning("RECRAFT_API_KEY not set, skipping face generation")
+async def _generate_face(name: str, appearance: str, candidate_id: str) -> str | None:
+    """Generate a realistic portrait photo via OpenRouter Gemini image model."""
+    if not OPENROUTER_API_KEY:
+        logger.warning("OPENROUTER_API_KEY not set, skipping face generation")
         return None
 
     prompt = (
-        f"Professional illustrated portrait of a person named {name}, "
-        f"who works as a {title}. Clean solid color background, "
-        f"friendly confident expression, modern business casual style, "
-        f"digital illustration, high quality, suitable for a professional profile picture."
+        f"Generate a photorealistic professional headshot portrait photograph. "
+        f"The person: {appearance}. "
+        f"Natural soft lighting, clean neutral background, high quality, "
+        f"looks like a real LinkedIn profile photo. Just the image, no text."
     )
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=90) as client:
             resp = await client.post(
-                "https://external.api.recraft.ai/v1/images/generations",
-                headers={"Authorization": f"Bearer {RECRAFT_API_KEY}"},
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
                 json={
-                    "prompt": prompt,
-                    "model": "recraftv4",
-                    "n": 1,
-                    "size": "1024x1024",
-                    "response_format": "url",
+                    "model": FACE_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
                 },
             )
             if resp.status_code != 200:
-                logger.error(f"Recraft face gen failed ({resp.status_code}): {resp.text[:200]}")
+                logger.error(f"Face gen failed ({resp.status_code}): {resp.text[:200]}")
                 return None
 
             data = resp.json()
-            image_url = data["data"][0]["url"]
+            msg = data["choices"][0]["message"]
 
-            # Download and save locally
-            img_resp = await client.get(image_url)
-            if img_resp.status_code != 200:
+            # OpenRouter returns images in message.images[]
+            images = msg.get("images", [])
+            if not images:
+                logger.warning("Face gen returned no images")
                 return None
 
+            image_url = images[0].get("image_url", {}).get("url", "")
+            if not image_url.startswith("data:image/"):
+                logger.warning(f"Unexpected image format: {image_url[:60]}")
+                return None
+
+            # Decode base64 image data and compress to JPEG
+            import base64
+            from io import BytesIO
+            from PIL import Image
+
+            b64_data = image_url.split(",", 1)[1]
+            img_bytes = base64.b64decode(b64_data)
+
             FACES_DIR.mkdir(parents=True, exist_ok=True)
-            face_path = FACES_DIR / f"{candidate_id}.png"
-            face_path.write_bytes(img_resp.content)
-            return f"/static/dashboard/faces/{candidate_id}.png"
+            face_path = FACES_DIR / f"{candidate_id}.jpg"
+
+            img = Image.open(BytesIO(img_bytes)).convert("RGB")
+            img.thumbnail((512, 512), Image.LANCZOS)
+            # Binary search for quality that fits under 200KB
+            lo, hi = 20, 92
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                buf = BytesIO()
+                img.save(buf, "JPEG", quality=mid)
+                if buf.tell() <= 200_000:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            buf = BytesIO()
+            img.save(buf, "JPEG", quality=lo)
+            face_path.write_bytes(buf.getvalue())
+            logger.info(f"Face saved: {face_path.name} ({buf.tell():,} bytes, q={lo})")
+            return f"/static/dashboard/faces/{candidate_id}.jpg"
     except Exception as e:
         logger.error(f"Face generation failed for {name}: {e}")
         return None
@@ -314,21 +417,31 @@ def _bundles_to_tools(bundle_keys: list[str]) -> list[str]:
 def render_team_dashboard(request: Request) -> Optional[Response]:
     """Team page using default navbar layout with card grid."""
 
-    # Load employees
-    db = _get_db()
+    # Load persistent agents (employees) from agents table
     employees: list[dict] = []
 
-    if db and db._conn:
-        try:
-            import sqlite3
-            sync_conn = sqlite3.connect(db.path)
-            cursor = sync_conn.execute(
-                "SELECT profile_json FROM employees WHERE status != 'archived' ORDER BY created_at DESC"
+    try:
+        from ..db_client import SessionLocal
+        from sqlalchemy import text as sa_text
+        from auton.db import _STATE_TO_STATUS
+        with SessionLocal() as session:
+            result = session.execute(
+                sa_text(
+                    "SELECT id, spec_json, state, profile_json FROM agents "
+                    "WHERE profile_json IS NOT NULL "
+                    "AND state NOT IN ('dead', 'terminating') "
+                    "ORDER BY created_at DESC"
+                )
             )
-            employees = [json.loads(row[0]) for row in cursor.fetchall()]
-            sync_conn.close()
-        except Exception as e:
-            logger.debug(f"Sync employee load fallback: {e}")
+            for row in result.fetchall():
+                profile = json.loads(row[3]) if isinstance(row[3], str) else row[3]
+                spec = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+                profile["id"] = row[0]
+                profile["spec"] = spec
+                profile["status"] = _STATE_TO_STATUS.get(row[2], row[2])
+                employees.append(profile)
+    except Exception as e:
+        logger.debug(f"Employee load failed: {e}")
 
     selected_id = request.query_params.get("employee")
 
@@ -403,6 +516,11 @@ def _render_employee_card(emp: dict):
         with ui.row().classes("items-center gap-2 mb-3"):
             ui.html(f'<div style="width:8px;height:8px;border-radius:50%;background:{color}"></div>')
             ui.label(status_label).classes("text-xs text-slate-500")
+            # Cadence badge
+            from auton.models import Cadence
+            cadence_val = emp.get("cadence", Cadence.NONE.value)
+            cadence_label = Cadence(cadence_val).label if cadence_val in [c.value for c in Cadence] else cadence_val
+            ui.badge(cadence_label, color="grey-4").classes("text-slate-500").style("font-size: 10px")
 
         strengths = emp.get("strengths", [])
         if strengths:
@@ -455,11 +573,12 @@ def _render_employee_detail(employee_id: str, employees: list[dict], vacancy_dia
 
         # Action buttons
         with ui.row().classes("gap-2 flex-shrink-0"):
-            if status == "active":
-                ui.button("Assign Task", icon="assignment",
-                          on_click=lambda e=emp: _open_assign_task_dialog(e)) \
+            if status != "archived":
+                ui.button("Add Task", icon="add_task",
+                          on_click=lambda e=emp: _open_add_task_dialog(e)) \
                     .props("unelevated no-caps color=primary")
 
+            if status == "active":
                 async def do_suspend(eid=employee_id):
                     db = _get_db()
                     if db:
@@ -499,6 +618,70 @@ def _render_employee_detail(employee_id: str, employees: list[dict], vacancy_dia
                 for s in strengths:
                     ui.badge(s).props("outline").classes("text-teal-600")
 
+    # Budget & Model card
+    monthly_budget = emp.get("monthly_budget_usd", 0)
+    budget_spent = emp.get("budget_spent_usd", 0)
+    model_id = spec.get("model", "")
+    model_short = model_id.split("/")[-1] if model_id else "not set"
+    max_tokens = spec.get("max_tokens") or 0
+    from .agents import _format_tokens
+
+    with ui.card().classes("w-full p-4 mb-4"):
+        with ui.row().classes("w-full items-center justify-between mb-2"):
+            ui.label("Budget & Model").classes("text-sm font-semibold text-slate-700")
+            ui.button("Edit", icon="edit",
+                      on_click=lambda e=emp: _open_edit_dialog(e)) \
+                .props("flat dense no-caps size=sm").classes("text-teal-600")
+        with ui.row().classes("gap-6 flex-wrap"):
+            with ui.column().classes("gap-0"):
+                ui.label("Model").classes("text-xs text-slate-400")
+                ui.label(model_short).classes("text-sm font-medium")
+            with ui.column().classes("gap-0"):
+                ui.label("Monthly Budget").classes("text-xs text-slate-400")
+                if monthly_budget:
+                    ui.label(f"${monthly_budget:,.0f}/mo").classes("text-sm font-medium")
+                else:
+                    ui.label("Unlimited").classes("text-sm font-medium text-slate-400")
+            with ui.column().classes("gap-0"):
+                ui.label("Spent This Period").classes("text-xs text-slate-400")
+                if monthly_budget:
+                    pct = (budget_spent / monthly_budget * 100) if monthly_budget else 0
+                    color = "text-red-600" if pct > 90 else "text-orange-500" if pct > 70 else "text-slate-700"
+                    ui.label(f"${budget_spent:,.2f} ({pct:.0f}%)").classes(f"text-sm font-medium {color}")
+                else:
+                    ui.label(f"${budget_spent:,.2f}").classes("text-sm font-medium")
+            with ui.column().classes("gap-0"):
+                ui.label("Token Budget / Task").classes("text-xs text-slate-400")
+                ui.label(_format_tokens(max_tokens) if max_tokens else "Unlimited") \
+                    .classes("text-sm font-medium")
+            with ui.column().classes("gap-0"):
+                ui.label("Max Turns").classes("text-xs text-slate-400")
+                ui.label(str(spec.get("max_turns", 30))).classes("text-sm font-medium")
+            with ui.column().classes("gap-0"):
+                ui.label("Temperature").classes("text-xs text-slate-400")
+                ui.label(f"{spec.get('temperature', 0.7):.1f}").classes("text-sm font-medium")
+
+    # Schedule card
+    from auton.models import Cadence
+    cadence_val = emp.get("cadence", Cadence.NONE.value)
+    cadence_label = Cadence(cadence_val).label if cadence_val in [c.value for c in Cadence] else cadence_val
+    work_start = emp.get("work_time_start", "09:00")
+    work_end = emp.get("work_time_end", "17:00")
+
+    with ui.card().classes("w-full p-4 mb-4"):
+        with ui.row().classes("w-full items-center justify-between mb-2"):
+            ui.label("Schedule").classes("text-sm font-semibold text-slate-700")
+            ui.button("Edit", icon="edit",
+                      on_click=lambda e=emp: _open_edit_dialog(e)) \
+                .props("flat dense no-caps size=sm").classes("text-teal-600")
+        with ui.row().classes("gap-6 flex-wrap"):
+            with ui.column().classes("gap-0"):
+                ui.label("Cadence").classes("text-xs text-slate-400")
+                ui.label(cadence_label).classes("text-sm font-medium")
+            with ui.column().classes("gap-0"):
+                ui.label("Work Time").classes("text-xs text-slate-400")
+                ui.label(f"{work_start} – {work_end}").classes("text-sm font-medium")
+
     # Tool Bundles
     bundles = emp.get("tool_bundles", [])
     with ui.card().classes("w-full p-4 mb-4"):
@@ -516,34 +699,262 @@ def _render_employee_detail(employee_id: str, employees: list[dict], vacancy_dia
         else:
             ui.label("No tools assigned").classes("text-xs text-slate-400")
 
-    # Active agent sessions for this employee
-    registry = _get_registry()
-    all_agents = registry.list_all() if registry else []
-    linked = [a for a in all_agents if a.get("spec", {}).get("metadata", {}).get("employee_id") == employee_id]
+    # Tasks card
+    tasks: list[dict] = []
+    try:
+        from ..db_client import SessionLocal
+        from sqlalchemy import text as sa_text
+        with SessionLocal() as session:
+            result = session.execute(
+                sa_text(
+                    "SELECT id, agent_id, definition, deliverables, status, "
+                    "session_id, created_at, started_at, completed_at "
+                    "FROM tasks WHERE agent_id = :agent_id "
+                    "ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, "
+                    "created_at ASC"
+                ),
+                {"agent_id": employee_id},
+            )
+            for row in result.fetchall():
+                deliverables = row[3]
+                tasks.append({
+                    "id": row[0],
+                    "definition": row[2],
+                    "deliverables": json.loads(deliverables) if isinstance(deliverables, str) else deliverables,
+                    "status": row[4],
+                    "session_id": row[5],
+                    "created_at": row[6],
+                    "started_at": row[7],
+                    "completed_at": row[8],
+                })
+    except Exception as e:
+        logger.debug(f"Task load failed: {e}")
+
+    TASK_STATUS_COLORS = {
+        "queued": "#94a3b8",
+        "active": "#3b82f6",
+        "completed": "#22c55e",
+    }
+    TASK_STATUS_LABELS = {
+        "queued": "Queued",
+        "active": "Active",
+        "completed": "Completed",
+    }
+    FORMAT_ICONS = {
+        "MD": "description",
+        "CSV": "table_chart",
+        "PDF": "picture_as_pdf",
+        "Excel": "grid_on",
+        "Word": "article",
+        "Custom": "tune",
+    }
+
+    queued_tasks = [t for t in tasks if t["status"] == "queued"]
+    running_tasks = [t for t in tasks if t["status"] == "active"]
+    active_tasks = queued_tasks + running_tasks
 
     with ui.card().classes("w-full p-4 mb-4"):
-        ui.label(f"Active Sessions ({len(linked)})").classes("text-sm font-semibold text-slate-700 mb-2")
-        if not linked:
-            ui.label("No active sessions — assign a task to get started").classes("text-xs text-slate-400")
+        with ui.row().classes("w-full items-center justify-between mb-2"):
+            count_label = f"{len(active_tasks)}" if active_tasks else "0"
+            ui.label(f"Tasks ({count_label} pending)").classes("text-sm font-semibold text-slate-700")
+            with ui.row().classes("gap-1"):
+                # Start / Stop buttons
+                if running_tasks:
+                    async def do_stop(e=emp):
+                        await _stop_active_tasks(e)
+                        ui.navigate.reload()
+                    ui.button("Stop", icon="stop",
+                              on_click=do_stop) \
+                        .props("flat dense no-caps size=sm").classes("text-red-500")
+                elif queued_tasks:
+                    async def do_start(e=emp):
+                        started = await _start_next_task(e)
+                        if started:
+                            ui.notify("Task started", type="positive")
+                        else:
+                            ui.notify("Could not start task", type="warning")
+                        ui.navigate.reload()
+                    ui.button("Start", icon="play_arrow",
+                              on_click=do_start) \
+                        .props("flat dense no-caps size=sm").classes("text-green-600")
+
+                ui.button("Add Task", icon="add_task",
+                          on_click=lambda e=emp: _open_add_task_dialog(e)) \
+                    .props("flat dense no-caps size=sm").classes("text-teal-600")
+
+        if not tasks:
+            ui.label("No tasks — add one to get started").classes("text-xs text-slate-400")
         else:
-            for agent in linked:
-                state = agent.get("state", "unknown")
-                aspec = agent.get("spec", {})
-                health = agent.get("health", {})
-                from .agents import STATE_COLORS as AGENT_COLORS
-                agent_color = AGENT_COLORS.get(state, "#94a3b8")
-                with ui.row().classes("items-center gap-3 py-2 border-b border-slate-100"):
-                    ui.html(f'<div style="width:8px;height:8px;border-radius:50%;background:{agent_color};flex-shrink:0"></div>')
-                    ui.label(aspec.get("goal", aspec.get("name", "?"))).classes("text-sm flex-grow truncate")
-                    ui.badge(state.upper()).style(f"background-color: {agent_color}; color: white; font-size: 10px")
-                    tokens = health.get("tokens_total", 0)
-                    if tokens:
-                        from .agents import _format_tokens
-                        ui.label(f"{_format_tokens(tokens)} tok").classes("text-xs text-slate-400")
+            for task in tasks:
+                t_status = task["status"]
+                t_color = TASK_STATUS_COLORS.get(t_status, "#94a3b8")
+                with ui.card().classes("w-full p-3 mb-2").style("border-left: 3px solid " + t_color):
+                    with ui.row().classes("w-full items-start justify-between gap-2"):
+                        with ui.column().classes("flex-grow gap-1 min-w-0"):
+                            ui.label(task["definition"]).classes(
+                                "text-sm text-slate-700"
+                                + (" line-through text-slate-400" if t_status == "completed" else "")
+                            ).style("white-space: pre-wrap")
+                            # Deliverables
+                            deliverables = task.get("deliverables", [])
+                            if deliverables:
+                                with ui.row().classes("gap-2 flex-wrap mt-1"):
+                                    for d in deliverables:
+                                        fmt = d.get("format", "MD")
+                                        icon = FORMAT_ICONS.get(fmt, "description")
+                                        with ui.row().classes("items-center gap-1 bg-slate-50 rounded px-2 py-1"):
+                                            ui.icon(icon, size="xs").classes("text-slate-400")
+                                            ui.label(d.get("description", fmt)).classes("text-xs text-slate-500 truncate").style("max-width: 200px")
+                                            ui.badge(fmt).props("outline").classes("text-slate-400").style("font-size: 9px")
+                        with ui.column().classes("items-end gap-1 flex-shrink-0"):
+                            ui.badge(TASK_STATUS_LABELS.get(t_status, t_status).upper()) \
+                                .style(f"background-color: {t_color}; color: white; font-size: 10px")
+                            if t_status == "queued":
+                                async def do_delete(tid=task["id"]):
+                                    db = _get_db()
+                                    if db:
+                                        await db.delete_task(tid)
+                                    ui.navigate.reload()
+                                ui.button(icon="close", on_click=do_delete) \
+                                    .props("flat round dense size=xs").classes("text-slate-400")
 
     # System Prompt (collapsible)
     with ui.expansion("System Prompt", icon="psychology").classes("w-full mb-4").props("dense"):
         ui.label(spec.get("system_prompt", "N/A")).classes("text-xs font-mono text-slate-600 whitespace-pre-wrap")
+
+
+# ---------------------------------------------------------------------------
+# Edit employee settings dialog
+# ---------------------------------------------------------------------------
+
+def _open_edit_dialog(emp: dict):
+    """Open dialog to edit budget, model, schedule, and other parameters."""
+    spec = emp.get("spec", {})
+    models = _fetch_top_models()
+    from auton.models import Cadence
+
+    dialog = ui.dialog()
+
+    with dialog:
+        with ui.card().classes("w-full max-w-xl p-6"):
+            ui.label(f"Edit {emp.get('name', 'Employee')}") \
+                .classes("text-lg font-bold mb-4")
+
+            # Model selector
+            current_model = spec.get("model", "openrouter/anthropic/claude-sonnet-4-6")
+            model_options = {m["id"]: f"{m['name']} ({m['ctx']//1000}k, ${m['price']*1e6:.1f}/M)" for m in models}
+            if current_model not in model_options:
+                model_options[current_model] = current_model
+
+            model_select = ui.select(
+                label="Model",
+                options=model_options,
+                value=current_model,
+            ).classes("w-full mb-3").props("outlined dense")
+
+            # Schedule section
+            ui.label("Schedule").classes("text-sm font-semibold text-slate-700 mt-2 mb-1")
+
+            cadence_options = {c.value: c.label for c in Cadence}
+            cadence_select = ui.select(
+                label="Cadence (heartbeat interval)",
+                options=cadence_options,
+                value=emp.get("cadence", Cadence.NONE.value),
+            ).classes("w-full mb-3").props("outlined dense")
+
+            with ui.row().classes("w-full gap-3 mb-3"):
+                work_start_input = ui.input(
+                    label="Work time start",
+                    value=emp.get("work_time_start", "09:00"),
+                ).classes("flex-1").props("outlined dense type=time")
+                work_end_input = ui.input(
+                    label="Work time end",
+                    value=emp.get("work_time_end", "17:00"),
+                ).classes("flex-1").props("outlined dense type=time")
+
+            ui.separator().classes("mb-2")
+            ui.label("Budget & Execution").classes("text-sm font-semibold text-slate-700 mb-1")
+
+            # Budget
+            monthly_budget = emp.get("monthly_budget_usd", 0)
+            budget_input = ui.number(
+                label="Monthly Budget (USD, 0 = unlimited)",
+                value=monthly_budget,
+                min=0, max=10000, step=10,
+            ).classes("w-full mb-3").props("outlined dense")
+
+            # Token budget per task
+            max_tokens = spec.get("max_tokens") or 0
+            tokens_input = ui.number(
+                label="Token Budget Per Task (0 = unlimited)",
+                value=max_tokens,
+                min=0, max=1_000_000_000, step=100_000,
+            ).classes("w-full mb-3").props("outlined dense")
+
+            # Max turns per task
+            max_turns = spec.get("max_turns", 30)
+            turns_input = ui.number(
+                label="Max Turns Per Task",
+                value=max_turns,
+                min=1, max=500, step=5,
+            ).classes("w-full mb-3").props("outlined dense")
+
+            # Temperature
+            temperature = spec.get("temperature", 0.7)
+            temp_input = ui.number(
+                label="Temperature",
+                value=temperature,
+                min=0, max=2.0, step=0.1,
+                format="%.1f",
+            ).classes("w-full mb-3").props("outlined dense")
+
+            with ui.row().classes("w-full justify-end gap-2 mt-2"):
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
+
+                async def save_changes():
+                    db = _get_db()
+                    if not db:
+                        ui.notify("Database not available", type="negative")
+                        return
+
+                    # Update spec
+                    new_spec = dict(spec)
+                    new_spec["model"] = model_select.value
+                    new_spec["max_turns"] = int(turns_input.value)
+                    new_spec["max_tokens"] = int(tokens_input.value) or None
+                    new_spec["temperature"] = float(temp_input.value)
+
+                    # Update profile
+                    employee_data = dict(emp)
+                    employee_data["spec"] = new_spec
+                    employee_data["monthly_budget_usd"] = float(budget_input.value)
+                    employee_data["cadence"] = cadence_select.value
+                    employee_data["work_time_start"] = work_start_input.value
+                    employee_data["work_time_end"] = work_end_input.value
+
+                    await db.save_employee(employee_data)
+
+                    # Update in-memory node if loaded in registry
+                    registry = _get_registry()
+                    if registry:
+                        node = registry.resolve(emp.get("id", ""))
+                        if node:
+                            from auton.models import AgentSpec
+                            node.spec = AgentSpec(**new_spec)
+                            if node.profile:
+                                node.profile["monthly_budget_usd"] = float(budget_input.value)
+                                node.profile["cadence"] = cadence_select.value
+                                node.profile["work_time_start"] = work_start_input.value
+                                node.profile["work_time_end"] = work_end_input.value
+
+                    dialog.close()
+                    ui.notify("Settings saved", type="positive")
+                    ui.navigate.reload()
+
+                ui.button("Save", icon="save", on_click=save_changes) \
+                    .props("unelevated no-caps color=primary")
+
+    dialog.open()
 
 
 # ---------------------------------------------------------------------------
@@ -724,7 +1135,7 @@ def _build_vacancy_dialog():
                         tools = _bundles_to_tools(bundles)
                         now = datetime.now(timezone.utc).isoformat()
 
-                        from auton.models import AgentSpec, EmployeeProfile
+                        from auton.models import AgentSpec
                         spec = AgentSpec(
                             name=cand["name"],
                             description=cand.get("title", ""),
@@ -733,18 +1144,22 @@ def _build_vacancy_dialog():
                             tools=tools,
                             model="openrouter/anthropic/claude-sonnet-4-6",
                             max_turns=50,
-                            max_tokens=100_000,
+                            max_tokens=500_000_000,
                         )
 
                         # Copy face image from candidate ID to employee ID
                         emp_id = f"emp-{uuid.uuid4().hex[:8]}"
                         avatar_url = cand.get("avatar_url")
                         if avatar_url and cand.get("_candidate_id"):
-                            src = FACES_DIR / f"{cand['_candidate_id']}.png"
-                            if src.exists():
-                                dst = FACES_DIR / f"{emp_id}.png"
-                                dst.write_bytes(src.read_bytes())
-                                avatar_url = f"/static/dashboard/faces/{emp_id}.png"
+                            cand_id = cand["_candidate_id"]
+                            # Try jpg first (new format), then png (legacy)
+                            for ext in ("jpg", "png"):
+                                src = FACES_DIR / f"{cand_id}.{ext}"
+                                if src.exists():
+                                    dst = FACES_DIR / f"{emp_id}.{ext}"
+                                    dst.write_bytes(src.read_bytes())
+                                    avatar_url = f"/static/dashboard/faces/{emp_id}.{ext}"
+                                    break
 
                         profile = {
                             "id": emp_id,
@@ -754,11 +1169,18 @@ def _build_vacancy_dialog():
                             "strengths": cand.get("strengths", []),
                             "avatar_emoji": cand.get("avatar_emoji", "🤖"),
                             "avatar_url": avatar_url,
+                            "appearance": cand.get("appearance", ""),
                             "status": "waiting_for_input",
                             "tool_bundles": bundles,
                             "spec": spec.model_dump(),
                             "hired_at": now,
                             "last_active": None,
+                            "monthly_budget_usd": 200.0,
+                            "budget_spent_usd": 0.0,
+                            "budget_period_start": now,
+                            "cadence": "none",
+                            "work_time_start": "09:00",
+                            "work_time_end": "17:00",
                         }
 
                         db = _get_db()
@@ -854,62 +1276,191 @@ def _populate_onboarding(container, candidate: dict, bundles_ref: dict):
 
 
 # ---------------------------------------------------------------------------
-# Assign Task dialog
+# Deliverable format options
 # ---------------------------------------------------------------------------
 
-def _open_assign_task_dialog(employee: dict):
-    """Open a dialog to assign a task (goal) to an employee, spawning an agent."""
+DELIVERABLE_FORMATS = ["MD", "CSV", "PDF", "Excel", "Word", "Custom"]
+
+
+# ---------------------------------------------------------------------------
+# Task execution helpers
+# ---------------------------------------------------------------------------
+
+async def _start_next_task(agent: dict) -> bool:
+    """Pick the next queued task for an agent and spawn a session.
+
+    Returns True if a task was started.
+    """
+    db = _get_db()
+    registry = _get_registry()
+    if not db or not registry:
+        return False
+
+    agent_id = agent.get("id", "")
+    queued = await db.list_tasks(agent_id, status="queued")
+    if not queued:
+        return False
+
+    task = queued[0]
+
+    # Build goal from task definition + deliverables
+    goal = task["definition"]
+    deliverables = task.get("deliverables", [])
+    if deliverables:
+        lines = [f"- {d['description']} ({d['format']})" for d in deliverables]
+        goal += "\n\nExpected deliverables:\n" + "\n".join(lines)
+
+    from auton.models import AgentSpec, SpawnRequest
+
+    spec_data = agent.get("spec", {})
+    spec = AgentSpec(**{**spec_data, "goal": goal})
+    spec.metadata = {**spec.metadata, "agent_id": agent_id, "task_id": task["id"]}
+
+    req = SpawnRequest(spec=spec)
+    try:
+        node = registry.spawn(req)
+        await db.update_task_status(task["id"], "active", session_id=node.id)
+
+        # Update last_active
+        emp_data = await db.get_employee(agent_id)
+        if emp_data:
+            emp_data["last_active"] = datetime.now(timezone.utc).isoformat()
+            await db.save_employee(emp_data)
+
+        return True
+    except Exception as e:
+        logger.error(f"Failed to start task {task['id']}: {e}")
+        return False
+
+
+async def _stop_active_tasks(agent: dict) -> None:
+    """Stop all active task sessions for an agent."""
+    db = _get_db()
+    registry = _get_registry()
+    if not db or not registry:
+        return
+
+    agent_id = agent.get("id", "")
+    active = await db.list_tasks(agent_id, status="active")
+    for task in active:
+        session_id = task.get("session_id")
+        if session_id:
+            try:
+                registry.terminate(session_id)
+            except Exception:
+                pass
+        # Requeue the task
+        await db.update_task_status(task["id"], "queued")
+
+
+# ---------------------------------------------------------------------------
+# Add Task dialog
+# ---------------------------------------------------------------------------
+
+def _open_add_task_dialog(agent: dict):
+    """Open a dialog to add a task with deliverables to a persistent agent."""
 
     dialog = ui.dialog()
+    deliverables_list: list[dict] = []
+    deliverable_rows: list = []
 
     with dialog:
         with ui.card().classes("w-full max-w-xl p-6"):
-            ui.label(f"Assign Task to {employee.get('name', '?')}") \
+            ui.label(f"Add Task — {agent.get('name', '?')}") \
                 .classes("text-lg font-bold mb-4")
 
             task_input = ui.textarea(
-                placeholder="Describe the task or goal for this employee...",
+                label="Task definition",
+                placeholder="Describe what needs to be done...",
             ).classes("w-full mb-4").props("outlined autogrow rows=4")
 
-            with ui.row().classes("w-full justify-end gap-2"):
+            # Deliverables section
+            ui.label("Deliverables").classes("text-sm font-semibold text-slate-700 mb-2")
+            deliverables_container = ui.column().classes("w-full gap-2 mb-3")
+
+            def add_deliverable_row(desc: str = "", fmt: str = "MD"):
+                entry = {"description": desc, "format": fmt}
+                deliverables_list.append(entry)
+                idx = len(deliverables_list) - 1
+
+                with deliverables_container:
+                    row = ui.row().classes("w-full items-center gap-2")
+                    deliverable_rows.append(row)
+                    with row:
+                        desc_input = ui.input(
+                            placeholder="What to deliver...",
+                            value=desc,
+                        ).classes("flex-grow").props("outlined dense")
+
+                        fmt_select = ui.select(
+                            options=DELIVERABLE_FORMATS,
+                            value=fmt,
+                        ).classes("w-28").props("outlined dense")
+
+                        def make_update_desc(i):
+                            def update(e):
+                                deliverables_list[i]["description"] = e.value
+                            return update
+
+                        def make_update_fmt(i):
+                            def update(e):
+                                deliverables_list[i]["format"] = e.value
+                            return update
+
+                        desc_input.on("update:model-value", make_update_desc(idx))
+                        fmt_select.on("update:model-value", make_update_fmt(idx))
+
+                        def make_remove(i, r):
+                            def remove():
+                                deliverables_list[i] = None  # mark as removed
+                                r.set_visibility(False)
+                            return remove
+
+                        ui.button(icon="close", on_click=make_remove(idx, row)) \
+                            .props("flat round dense size=sm").classes("text-slate-400")
+
+            ui.button("Add deliverable", icon="add",
+                      on_click=lambda: add_deliverable_row()) \
+                .props("flat dense no-caps size=sm").classes("text-teal-600 mb-2")
+
+            with ui.row().classes("w-full justify-end gap-2 mt-2"):
                 ui.button("Cancel", on_click=dialog.close).props("flat no-caps")
 
-                async def assign():
-                    goal = task_input.value.strip()
-                    if not goal:
+                async def submit_task():
+                    definition = task_input.value.strip()
+                    if not definition:
                         ui.notify("Please describe the task", type="warning")
                         return
 
-                    registry = _get_registry()
-                    if not registry:
-                        ui.notify("Agent registry not available", type="negative")
+                    # Collect non-removed deliverables
+                    final_deliverables = [
+                        d for d in deliverables_list
+                        if d is not None and d.get("description", "").strip()
+                    ]
+
+                    db = _get_db()
+                    if not db:
+                        ui.notify("Database not available", type="negative")
                         return
 
-                    from auton.models import AgentSpec, SpawnRequest
+                    agent_id = agent.get("id", "")
+                    await db.create_task(agent_id, definition, final_deliverables)
 
-                    spec_data = employee.get("spec", {})
-                    spec = AgentSpec(**{**spec_data, "goal": goal})
-                    spec.metadata = {**spec.metadata, "employee_id": employee["id"]}
+                    # Auto-start if no active task is running
+                    active = await db.list_tasks(agent_id, status="active")
+                    if not active:
+                        started = await _start_next_task(agent)
+                        if started:
+                            ui.notify("Task added and started", type="positive")
+                        else:
+                            ui.notify("Task queued", type="positive")
+                    else:
+                        ui.notify("Task queued — agent is busy", type="info")
 
-                    req = SpawnRequest(spec=spec)
-                    try:
-                        node = registry.spawn(req)
-                        dialog.close()
-                        ui.notify(f"Task assigned! Agent {node.id} is on it.", type="positive")
+                    dialog.close()
+                    ui.navigate.reload()
 
-                        # Update last_active
-                        db = _get_db()
-                        if db:
-                            emp_data = await db.get_employee(employee["id"])
-                            if emp_data:
-                                emp_data["last_active"] = datetime.now(timezone.utc).isoformat()
-                                await db.save_employee(emp_data)
-
-                        ui.navigate.reload()
-                    except Exception as e:
-                        ui.notify(f"Failed to spawn agent: {e}", type="negative")
-
-                ui.button("Assign & Go", icon="rocket_launch", on_click=assign) \
+                ui.button("Add Task", icon="add_task", on_click=submit_task) \
                     .props("unelevated no-caps color=primary")
 
     dialog.open()

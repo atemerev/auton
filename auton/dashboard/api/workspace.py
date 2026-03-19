@@ -12,7 +12,10 @@ router = APIRouter(tags=["workspace"])
 @router.get("/workspace/{agent_id}/{filepath:path}")
 async def download_workspace_file(agent_id: str, filepath: str):
     """Download a file from an agent's workspace."""
-    ws = get_workspace_path(agent_id)
+    from auton.api import registry
+    node = registry.resolve(agent_id)
+    uid = node.user_id if node else None
+    ws = get_workspace_path(agent_id, uid)
     full_path = (ws / filepath).resolve()
 
     # Prevent path traversal

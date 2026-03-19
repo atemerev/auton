@@ -101,6 +101,17 @@ class AgentRegistry:
         node.transition(AgentState.RUNNING)
         node._log_event("spawned", {"goal": req.spec.goal, "model": req.spec.model})
 
+        # Persist to DB immediately so agent survives restarts
+        if self.db:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.db.save_agent(node))
+            except RuntimeError:
+                if self._loop:
+                    self._loop.call_soon_threadsafe(
+                        lambda: self._loop.create_task(self.db.save_agent(node))
+                    )
+
         # Start executor if publish_event is wired
         if self.publish_event:
             self._start_executor(node)
@@ -325,6 +336,8 @@ class AgentRegistry:
             id=data["id"],
             spec=spec,
             parent_path=data.get("parent_path"),
+            user_id=data.get("user_id"),
+            profile=data.get("profile"),
         )
         # Restore state without transition validation
         node.state = AgentState(data["state"])

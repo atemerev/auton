@@ -71,3 +71,61 @@ CREATE POLICY users_update_own ON users
 CREATE POLICY api_keys_all_own ON api_keys
     USING (user_id = current_user_id())
     WITH CHECK (user_id = current_user_id());
+
+-- ---------------------------------------------------------------------------
+-- Agent runtime tables (consolidated from SQLite)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS agents (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    parent_path TEXT,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    spec_json JSONB NOT NULL,
+    state TEXT NOT NULL,
+    health_json JSONB NOT NULL,
+    restart_count INTEGER DEFAULT 0,
+    idle_reason TEXT,
+    profile_json JSONB,  -- non-null = persistent "employee" agent
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id);
+CREATE INDEX IF NOT EXISTS idx_agents_profile ON agents(id) WHERE profile_json IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    checkpoint_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_agent_id ON checkpoints(agent_id);
+
+CREATE TABLE IF NOT EXISTS spec_templates (
+    name TEXT PRIMARY KEY,
+    spec_json JSONB NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    agent_path TEXT NOT NULL,
+    mime_type TEXT NOT NULL DEFAULT 'text/markdown',
+    description TEXT NOT NULL DEFAULT '',
+    tags JSONB NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'expected',
+    file_size INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_agent_id ON artifacts(agent_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_status ON artifacts(status);

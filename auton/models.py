@@ -68,6 +68,24 @@ class ArtifactStatus(str, Enum):
     MISSING = "missing"        # agent finished without producing it
 
 
+class Cadence(str, Enum):
+    NONE = "none"                  # manual only — do not return to tasks automatically
+    CONTINUOUS = "continuous"       # returns immediately after each task
+    FIFTEEN_MIN = "15m"            # checks every 15 minutes
+    HOURLY = "hourly"              # checks every hour
+    DAILY = "daily"                # checks once at start of work time
+
+    @property
+    def label(self) -> str:
+        return {
+            "none": "Manual only",
+            "continuous": "Continuous",
+            "15m": "Every 15 minutes",
+            "hourly": "Hourly",
+            "daily": "Daily",
+        }[self.value]
+
+
 class RestartPolicy(str, Enum):
     NEVER = "never"
     ON_FAILURE = "on_failure"
@@ -173,31 +191,6 @@ class ArtifactRecord(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ---------------------------------------------------------------------------
-# Employee profile (persistent agent-as-employee)
-# ---------------------------------------------------------------------------
-
-
-class EmployeeProfile(BaseModel):
-    """Persistent agent identity with personality, role, and tool configuration.
-
-    Wraps an AgentSpec with HR-metaphor metadata: the employee persists across
-    sessions and can be assigned tasks repeatedly.
-    """
-    id: str
-    name: str                          # generated human name, e.g. "Alex Chen"
-    title: str                         # role title, e.g. "Marketing Research Analyst"
-    personality: str                   # brief personality description
-    strengths: list[str] = Field(default_factory=list)
-    avatar_emoji: str = "🤖"
-    avatar_url: str | None = None      # URL to generated face image
-    status: str = "active"             # active | waiting_for_input | suspended | archived
-    tool_bundles: list[str] = Field(default_factory=list)  # bundle keys
-    spec: AgentSpec                    # underlying agent specification
-    hired_at: str = ""                 # ISO timestamp
-    last_active: str | None = None
-
-
 class SpawnRequest(BaseModel):
     """Request to spawn a new agent. Provide either a full spec or a template name + overrides."""
     id: str | None = None
@@ -235,10 +228,14 @@ class AgentNode:
         id: str,
         spec: AgentSpec,
         parent_path: str | None = None,
+        user_id: str | None = None,
+        profile: dict[str, Any] | None = None,
     ):
         self.id = id
         self.spec = spec
         self.parent_path = parent_path
+        self.user_id = user_id         # owner (FK to users.id)
+        self.profile = profile         # non-None = persistent "employee" agent
         self.state = AgentState.SPAWNING
         self.suspend_reason: SuspendReason | None = None
         self.idle_reason: IdleReason | None = None

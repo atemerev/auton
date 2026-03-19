@@ -1,7 +1,8 @@
 """Workspace file and shell tools — closure-bound to agent workspace.
 
-Factory functions return closures bound to a specific agent_id.
-Each tool is sandboxed to the agent's workspace directory.
+Factory functions return closures bound to a specific agent_id / user_id.
+File tools access the host-side workspace directory (bind-mounted into
+the user's container). Shell tools exec inside the container for isolation.
 """
 
 import json
@@ -26,11 +27,11 @@ def _safe_resolve(workspace: Path, relative_path: str) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# File tools
+# File tools (host-side, through bind mount)
 # ---------------------------------------------------------------------------
 
 
-def make_write_file(agent_id: str):
+def make_write_file(agent_id: str, user_id: str | None = None):
     """Create a write_file tool bound to an agent's workspace."""
 
     def write_file(path: str, content: str) -> str:
@@ -45,7 +46,7 @@ def make_write_file(agent_id: str):
         Returns:
             Confirmation with file path and size
         """
-        ws = get_workspace_path(agent_id)
+        ws = get_workspace_path(agent_id, user_id)
         ws.mkdir(parents=True, exist_ok=True)
         target = _safe_resolve(ws, path)
         if target is None:
@@ -57,7 +58,7 @@ def make_write_file(agent_id: str):
     return write_file
 
 
-def make_read_file(agent_id: str):
+def make_read_file(agent_id: str, user_id: str | None = None):
     """Create a read_file tool bound to an agent's workspace."""
 
     def read_file(path: str) -> str:
@@ -69,7 +70,7 @@ def make_read_file(agent_id: str):
         Returns:
             File content or error message
         """
-        ws = get_workspace_path(agent_id)
+        ws = get_workspace_path(agent_id, user_id)
         target = _safe_resolve(ws, path)
         if target is None:
             return json.dumps({"status": "error", "message": "Path escapes workspace boundary"})
@@ -87,7 +88,7 @@ def make_read_file(agent_id: str):
     return read_file
 
 
-def make_list_files(agent_id: str):
+def make_list_files(agent_id: str, user_id: str | None = None):
     """Create a list_files tool bound to an agent's workspace."""
 
     def list_files(subpath: str = "") -> str:
@@ -100,7 +101,7 @@ def make_list_files(agent_id: str):
             JSON with file paths, sizes, and modification times
         """
         if subpath:
-            ws = get_workspace_path(agent_id)
+            ws = get_workspace_path(agent_id, user_id)
             target = _safe_resolve(ws, subpath)
             if target is None:
                 return json.dumps({"status": "error", "message": "Path escapes workspace"})
@@ -116,68 +117,70 @@ def make_list_files(agent_id: str):
                         "size": stat.st_size,
                     })
         else:
-            files = list_workspace_files(agent_id)
+            files = list_workspace_files(agent_id, user_id)
         return json.dumps({"status": "OK", "files": files, "count": len(files)})
 
     return list_files
 
 
 # ---------------------------------------------------------------------------
-# Shell tool
+# Shell tool (executes inside user's container)
 # ---------------------------------------------------------------------------
 
 
-def make_shell_exec(agent_id: str):
-    """Create a shell_exec tool bound to an agent's workspace."""
+def make_shell_exec(agent_id: str, user_id: str | None = None):
+    """Create a shell_exec tool. Uses podman container if user_id is set."""
 
     def shell_exec(command: str, timeout: int = 60) -> str:
-        """Execute a shell command in the agent's workspace directory.
+        """Execute a shell command in the workspace.
 
-        The working directory is the agent's workspace. Use for git, build
-        tools, scripts, file manipulation, etc.
+        The working directory is /workspace. You can install packages
+        (apk add, pip install, npm install) and run any tools.
 
         Args:
-            command: Shell command to execute (e.g. "git status", "ls -la", "python script.py")
+            command: Shell command to execute (e.g. "git status", "pip install requests")
             timeout: Maximum seconds to wait (default: 60, max: 300)
 
         Returns:
             JSON with stdout, stderr, and return code
         """
-        ws = get_workspace_path(agent_id)
-        ws.mkdir(parents=True, exist_ok=True)
         timeout = min(max(timeout, 1), 300)
 
-        # Block obviously destructive system-level commands
-        blocked_patterns = ["rm -rf /", "sudo ", "mkfs ", "dd if=/dev"]
-        cmd_lower = command.lower().strip()
-        for pattern in blocked_patterns:
-            if pattern in cmd_lower:
-                return json.dumps({"status": "error", "message": f"Blocked command pattern: {pattern}"})
+        if user_id:
+            # Container-isolated execution
+            from auton.containers import ContainerManager
+            mgr = ContainerManager.get()
+            result = mgr.exec_command(user_id, command, timeout=timeout)
+            return json.dumps({"status": "OK", **result})
+        else:
+            # Legacy local execution (no user context)
+            ws = get_workspace_path(agent_id)
+            ws.mkdir(parents=True, exist_ok=True)
 
-        try:
-            env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-            result = subprocess.run(
-                command,
-                shell=True,
-                cwd=str(ws),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
-            # Truncate output to prevent token explosion
-            stdout = result.stdout[-10_000:] if len(result.stdout) > 10_000 else result.stdout
-            stderr = result.stderr[-5_000:] if len(result.stderr) > 5_000 else result.stderr
-            return json.dumps({
-                "status": "OK",
-                "return_code": result.returncode,
-                "stdout": stdout,
-                "stderr": stderr,
-            })
-        except subprocess.TimeoutExpired:
-            return json.dumps({"status": "error", "message": f"Command timed out after {timeout}s"})
-        except Exception as e:
-            return json.dumps({"status": "error", "message": str(e)})
+            blocked_patterns = ["rm -rf /", "sudo ", "mkfs ", "dd if=/dev"]
+            cmd_lower = command.lower().strip()
+            for pattern in blocked_patterns:
+                if pattern in cmd_lower:
+                    return json.dumps({"status": "error", "message": f"Blocked: {pattern}"})
+
+            try:
+                env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+                result = subprocess.run(
+                    command, shell=True, cwd=str(ws),
+                    capture_output=True, text=True, timeout=timeout, env=env,
+                )
+                stdout = result.stdout[-10_000:] if len(result.stdout) > 10_000 else result.stdout
+                stderr = result.stderr[-5_000:] if len(result.stderr) > 5_000 else result.stderr
+                return json.dumps({
+                    "status": "OK",
+                    "return_code": result.returncode,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                })
+            except subprocess.TimeoutExpired:
+                return json.dumps({"status": "error", "message": f"Timed out after {timeout}s"})
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
 
     return shell_exec
 
@@ -187,7 +190,7 @@ def make_shell_exec(agent_id: str):
 # ---------------------------------------------------------------------------
 
 
-def make_publish_artifact(agent_id: str, agent_path: str, registry):
+def make_publish_artifact(agent_id: str, agent_path: str, registry, user_id: str | None = None):
     """Create a publish_artifact tool that registers a workspace file as a named artifact."""
 
     def publish_artifact(
@@ -214,7 +217,7 @@ def make_publish_artifact(agent_id: str, agent_path: str, registry):
         """
         from auton.models import ArtifactRecord, ArtifactStatus
 
-        ws = get_workspace_path(agent_id)
+        ws = get_workspace_path(agent_id, user_id)
         target = _safe_resolve(ws, file_path)
         if target is None:
             return json.dumps({"status": "error", "message": "Path escapes workspace boundary"})
@@ -278,7 +281,7 @@ def make_publish_artifact(agent_id: str, agent_path: str, registry):
     return publish_artifact
 
 
-def make_pass_artifact(agent_id: str, registry):
+def make_pass_artifact(agent_id: str, registry, user_id: str | None = None):
     """Create a pass_artifact tool that copies files to another agent's workspace."""
 
     def pass_artifact(file_path: str, target_agent_path: str, target_file_path: str = "") -> str:
@@ -296,7 +299,7 @@ def make_pass_artifact(agent_id: str, registry):
             Confirmation with source and destination details
         """
         # Resolve source file
-        src_ws = get_workspace_path(agent_id)
+        src_ws = get_workspace_path(agent_id, user_id)
         src = _safe_resolve(src_ws, file_path)
         if src is None:
             return json.dumps({"status": "error", "message": "Source path escapes workspace"})
@@ -310,8 +313,9 @@ def make_pass_artifact(agent_id: str, registry):
         if target_node is None:
             return json.dumps({"status": "error", "message": f"Target agent not found: {target_agent_path}"})
 
-        # Copy to target workspace
-        target_ws = get_workspace_path(target_node.id)
+        # Copy to target workspace (use target's user_id for per-user workspace)
+        target_uid = getattr(target_node, "user_id", None)
+        target_ws = get_workspace_path(target_node.id, target_uid)
         target_ws.mkdir(parents=True, exist_ok=True)
         dest_rel = target_file_path or file_path
         dest = _safe_resolve(target_ws, dest_rel)

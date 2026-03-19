@@ -273,7 +273,7 @@ def make_read_child_file(agent_id: str, registry):
         if node is None:
             return json.dumps({"status": "error", "message": f"Agent not found: {child_path}"})
 
-        child_ws = get_workspace_path(node.id)
+        child_ws = get_workspace_path(node.id, getattr(node, "user_id", None))
         target = _safe_resolve(child_ws, file_path)
         if target is None:
             return json.dumps({"status": "error", "message": "Path escapes workspace boundary"})

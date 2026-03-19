@@ -272,7 +272,7 @@ class AgentExecutor:
         for artifact in node.artifacts:
             if artifact.status != ArtifactStatus.EXPECTED:
                 continue
-            ws = get_workspace_path(node.id)
+            ws = get_workspace_path(node.id, node.user_id)
             target = ws / artifact.file_path
             if target.exists() and target.is_file():
                 artifact.status = ArtifactStatus.PUBLISHED
@@ -299,8 +299,9 @@ class AgentExecutor:
 
         # Ensure workspace if agent uses any workspace tools
         requested_tools = set(node.spec.tools)
+        user_id = node.user_id
         if requested_tools & WORKSPACE_TOOLS:
-            ensure_workspace(node.id)
+            ensure_workspace(node.id, user_id)
 
         # System prompt comes directly from the spec — no implicit defaults
         system_prompt = node.spec.system_prompt
@@ -371,30 +372,30 @@ class AgentExecutor:
                 func, schema = TOOL_REGISTRY[tool_name]
                 llm.add_tool(func, schema)
 
-        # Workspace file tools (closure-bound to agent_id)
+        # Workspace file tools (closure-bound to agent_id + user_id)
         if "write_file" in requested_tools:
-            fn = make_write_file(node.id)
+            fn = make_write_file(node.id, user_id)
             llm.add_tool(fn, function_to_schema(fn))
         if "read_file" in requested_tools:
-            fn = make_read_file(node.id)
+            fn = make_read_file(node.id, user_id)
             llm.add_tool(fn, function_to_schema(fn))
         if "list_files" in requested_tools:
-            fn = make_list_files(node.id)
+            fn = make_list_files(node.id, user_id)
             llm.add_tool(fn, function_to_schema(fn))
 
-        # Shell tool (closure-bound to agent_id)
+        # Shell tool (container-isolated when user_id is set)
         if "shell_exec" in requested_tools:
-            fn = make_shell_exec(node.id)
+            fn = make_shell_exec(node.id, user_id)
             llm.add_tool(fn, function_to_schema(fn))
 
         # Artifact sharing (needs registry for cross-agent access)
         if "pass_artifact" in requested_tools and self.registry:
-            fn = make_pass_artifact(node.id, self.registry)
+            fn = make_pass_artifact(node.id, self.registry, user_id)
             llm.add_tool(fn, function_to_schema(fn))
 
         # Artifact publishing (registers workspace files with metadata)
         if "publish_artifact" in requested_tools and self.registry:
-            fn = make_publish_artifact(node.id, node.path, self.registry)
+            fn = make_publish_artifact(node.id, node.path, self.registry, user_id)
             llm.add_tool(fn, function_to_schema(fn))
 
         # Agent coordination tools (need registry)

@@ -1,5 +1,6 @@
 """Agent sessions dashboard — full-height sidebar + detail panel (Claude-style layout)."""
 
+import json
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import Request
@@ -76,6 +77,48 @@ def render_agents_dashboard(request: Request) -> Optional[Response]:
     registry = _get_registry()
     agents = registry.list_all()
 
+    # Load employee profiles from DB and annotate agents
+    employee_ids = set()
+    employee_profiles = {}
+    try:
+        from ..db_client import SessionLocal
+        from sqlalchemy import text as sa_text
+        with SessionLocal() as session:
+            result = session.execute(
+                sa_text(
+                    "SELECT id, profile_json FROM agents "
+                    "WHERE profile_json IS NOT NULL AND state NOT IN ('dead', 'terminating')"
+                )
+            )
+            for row in result.fetchall():
+                eid = row[0]
+                profile = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+                employee_ids.add(eid)
+                employee_profiles[eid] = profile
+    except Exception:
+        pass
+
+    # Annotate agents with profile data
+    for agent in agents:
+        aid = agent.get("id", "")
+        if aid in employee_profiles:
+            agent["_profile"] = employee_profiles[aid]
+            agent["_is_employee"] = True
+
+    # Add employee agents not yet in registry (e.g., just hired)
+    registry_ids = {a.get("id") for a in agents}
+    for eid, profile in employee_profiles.items():
+        if eid not in registry_ids:
+            agents.append({
+                "id": eid, "path": eid,
+                "state": "idle", "spec": profile.get("spec", {}),
+                "health": {}, "children": [],
+                "_profile": profile, "_is_employee": True,
+            })
+
+    # Sort: employees first, then by state
+    agents.sort(key=lambda a: (0 if a.get("_is_employee") else 1, a.get("id", "")))
+
     selected = selected_from_url
     if not selected and agents:
         selected = agents[0].get("path")
@@ -90,102 +133,94 @@ def render_agents_dashboard(request: Request) -> Optional[Response]:
     </style>
     """)
 
-    # ── Full-viewport two-column layout ──
-    with ui.row().classes("w-screen gap-0 flex-nowrap").style("height: 100vh; overflow: hidden"):
+    # ── Full-viewport layout: navbar on top, sidebar+detail below ──
+    with ui.column().classes("w-screen gap-0").style("height: 100vh; overflow: hidden"):
 
         # ════════════════════════════════════════
-        # LEFT: Full-height sidebar
+        # TOP: Full-width navbar
         # ════════════════════════════════════════
-        with ui.column().classes("gap-0 bg-slate-50 border-r border-slate-200 flex-shrink-0") \
-                .style("width: 280px; min-width: 280px; height: 100vh"):
+        with ui.row().classes(
+            "w-full items-center justify-between px-6 bg-white border-b border-slate-200 flex-shrink-0"
+        ).style("height: 56px; min-height: 56px"):
 
-            # Branding header
-            with ui.row().classes("items-center gap-3 px-5 py-4 border-b border-slate-200"):
+            with ui.row().classes("items-center gap-3"):
                 with ui.link(target="/").classes("no-underline flex items-center gap-2"):
                     ui.image("/static/dashboard/favicon.svg").classes("w-7 h-7")
                     ui.label("AUTON").classes("text-xl font-bold").style("color: #16203C")
 
-            # Sessions label + refresh
-            with ui.row().classes("w-full justify-between items-center px-4 py-2 border-b border-slate-100"):
-                ui.label("Sessions").classes("text-xs font-semibold text-slate-400 uppercase tracking-wider")
-                ui.button(icon="refresh", on_click=lambda: ui.navigate.reload()) \
-                    .props("flat dense round size=xs").classes("text-slate-400")
+                ui.separator().props("vertical inset").style("height: 24px")
 
-            # Session list (scrollable)
-            with ui.column().classes("gap-0 overflow-y-auto flex-grow"):
-                if not agents:
-                    with ui.column().classes("w-full items-center py-12 px-4"):
-                        ui.icon("smart_toy", size="lg").classes("text-slate-300 mb-2")
-                        ui.label("No agents running").classes("text-slate-400 text-sm")
-                else:
-                    for agent in agents:
-                        _render_sidebar_item(agent, selected)
+                nav_items = [
+                    ("/agents-dashboard", "Agents", "smart_toy"),
+                    ("/team", "Team", "badge"),
 
-            # Bottom section — tier / credits
-            with ui.column().classes("px-4 py-3 border-t border-slate-200 flex-shrink-0"):
+                    ("/account-settings", "Settings", "settings"),
+                ]
+                for path, label, icon in nav_items:
+                    with ui.link(target=path).classes("no-underline"):
+                        btn = ui.button(label, icon=icon).props("flat dense no-caps")
+                        if current_path == path:
+                            btn.style("border-bottom: 2px solid #1DE0C8; border-radius: 0")
+
+            with ui.row().classes("items-center gap-4"):
                 tier_name = TIER_NAMES.get(user.tier, "Free")
-                credits = user.credits
-                with ui.row().classes("items-center gap-2 text-xs text-slate-500"):
-                    ui.icon("account_circle", size="xs")
-                    ui.label(user.email).classes("truncate")
-                with ui.row().classes("items-center gap-2 text-xs text-slate-500 mt-1"):
-                    ui.label(tier_name).classes("font-medium")
-                    ui.label("·")
-                    if user.tier == TIER_FOUNDER:
-                        ui.html('<span class="font-bold" style="color: #1DE0C8;">&infin;</span> credits')
+                with ui.row().classes("items-center gap-2 text-sm"):
+                    ui.label(tier_name).classes("text-slate-600 font-medium")
+                    ui.separator().props("vertical inset")
+                    with ui.row().classes("items-center gap-1"):
+                        ui.label("Credits:").classes("text-slate-600")
+                        if user.tier == TIER_FOUNDER:
+                            ui.html('<span class="font-bold text-xl" style="color: #1DE0C8;">&infin;</span>')
+                        else:
+                            ui.label(str(user.credits)).classes("text-slate-600")
+
+                if user.tier == TIER_FREE:
+                    with ui.link(target="/account-settings?tab=subscriptions").classes("no-underline"):
+                        ui.button("Upgrade", color="primary").props("dense unelevated")
+
+                with ui.link(target="/auth/logout").classes("no-underline"):
+                    ui.button("Logout", icon="logout", color="primary").props("flat dense")
+
+        # ════════════════════════════════════════
+        # BOTTOM: Sidebar + Detail (fills remaining height)
+        # ════════════════════════════════════════
+        with ui.row().classes("w-full gap-0 flex-nowrap flex-grow").style("min-height: 0"):
+
+            # ── LEFT: Agent sidebar ──
+            with ui.column().classes("gap-0 bg-slate-50 border-r border-slate-200 flex-shrink-0") \
+                    .style("width: 280px; min-width: 280px; height: 100%"):
+
+                # Agents label + refresh
+                with ui.row().classes("w-full justify-between items-center px-4 py-2 border-b border-slate-100"):
+                    ui.label("Agents").classes("text-xs font-semibold text-slate-400 uppercase tracking-wider")
+                    ui.button(icon="refresh", on_click=lambda: ui.navigate.reload()) \
+                        .props("flat dense round size=xs").classes("text-slate-400")
+
+                # Agent list (scrollable)
+                with ui.column().classes("gap-0 overflow-y-auto flex-grow"):
+                    if not agents:
+                        with ui.column().classes("w-full items-center py-12 px-4"):
+                            ui.icon("smart_toy", size="lg").classes("text-slate-300 mb-2")
+                            ui.label("No agents").classes("text-slate-400 text-sm")
                     else:
-                        ui.label(f"{credits} credits")
+                        for agent in agents:
+                            _render_sidebar_item(agent, selected)
 
-        # ════════════════════════════════════════
-        # RIGHT: Header navbar + Detail panel
-        # ════════════════════════════════════════
-        with ui.column().classes("flex-grow gap-0").style("height: 100vh; overflow: hidden; min-width: 0"):
+                # Bottom section — user info
+                with ui.column().classes("px-4 py-3 border-t border-slate-200 flex-shrink-0"):
+                    with ui.row().classes("items-center gap-2 text-xs text-slate-500"):
+                        ui.icon("account_circle", size="xs")
+                        ui.label(user.email).classes("truncate")
 
-            # ── Top navbar ──
-            with ui.row().classes(
-                "w-full items-center justify-between px-6 bg-white border-b border-slate-200 flex-shrink-0"
-            ).style("height: 56px; min-height: 56px"):
-
-                with ui.row().classes("items-center gap-2"):
-                    nav_items = [
-                        ("/agents-dashboard", "Agents", "smart_toy"),
-                        ("/team", "Team", "badge"),
-                        ("/monitoring", "Monitoring", "monitor_heart"),
-                        ("/account-settings", "Settings", "settings"),
-                    ]
-                    for path, label, icon in nav_items:
-                        with ui.link(target=path).classes("no-underline"):
-                            btn = ui.button(label, icon=icon).props("flat dense no-caps")
-                            if current_path == path:
-                                btn.style("border-bottom: 2px solid #1DE0C8; border-radius: 0")
-
-                with ui.row().classes("items-center gap-4"):
-                    tier_name = TIER_NAMES.get(user.tier, "Free")
-                    with ui.row().classes("items-center gap-2 text-sm"):
-                        ui.label(tier_name).classes("text-slate-600 font-medium")
-                        ui.separator().props("vertical inset")
-                        with ui.row().classes("items-center gap-1"):
-                            ui.label("Credits:").classes("text-slate-600")
-                            if user.tier == TIER_FOUNDER:
-                                ui.html('<span class="font-bold text-xl" style="color: #1DE0C8;">&infin;</span>')
-                            else:
-                                ui.label(str(user.credits)).classes("text-slate-600")
-
-                    if user.tier == TIER_FREE:
-                        with ui.link(target="/account-settings?tab=subscriptions").classes("no-underline"):
-                            ui.button("Upgrade", color="primary").props("dense unelevated")
-
-                    with ui.link(target="/auth/logout").classes("no-underline"):
-                        ui.button("Logout", icon="logout", color="primary").props("flat dense")
-
-            # ── Detail panel (scrollable) ──
-            with ui.column().classes("flex-grow overflow-y-auto p-6 bg-white"):
+            # ── RIGHT: Detail panel ──
+            with ui.column().classes("flex-grow gap-0 overflow-y-auto p-6 bg-white").style("min-width: 0"):
                 if selected:
-                    _render_detail_panel(selected, registry)
+                    sel_agent = next((a for a in agents if a.get("path") == selected), None)
+                    _render_detail_panel(selected, registry, agent_data=sel_agent)
                 else:
                     with ui.column().classes("w-full h-full items-center justify-center"):
                         ui.icon("smart_toy", size="xl").classes("text-slate-200 mb-4")
-                        ui.label("Select an agent session").classes("text-xl text-slate-400")
+                        ui.label("Select an agent").classes("text-xl text-slate-400")
 
     return None
 
@@ -199,6 +234,8 @@ def _render_sidebar_item(agent: dict, selected_path: str, depth: int = 0):
     tokens = health.get("tokens_total", 0)
     color = STATE_COLORS.get(state, "#94a3b8")
     is_selected = path == selected_path
+    is_employee = agent.get("_is_employee", False)
+    profile = agent.get("_profile", {})
 
     bg = "bg-teal-50" if is_selected else "hover:bg-slate-100"
     border = "border-l-[3px] border-teal-500" if is_selected else "border-l-[3px] border-transparent"
@@ -212,30 +249,56 @@ def _render_sidebar_item(agent: dict, selected_path: str, depth: int = 0):
             .on("click", select_agent):
 
         with ui.row().classes("items-center gap-2 w-full flex-nowrap"):
-            # State dot
-            ui.html(f'<div style="width:8px;height:8px;border-radius:50%;background:{color};flex-shrink:0"></div>')
+            if is_employee:
+                # Employee avatar
+                avatar_url = profile.get("avatar_url")
+                if avatar_url:
+                    ui.image(avatar_url).style(
+                        "width: 24px; height: 24px; border-radius: 50%; "
+                        "object-fit: cover; flex-shrink: 0"
+                    )
+                else:
+                    emoji = profile.get("avatar_emoji", "🤖")
+                    ui.label(emoji).style(
+                        "font-size: 14px; width: 24px; height: 24px; "
+                        "display: flex; align-items: center; justify-content: center; flex-shrink: 0"
+                    )
+            else:
+                # State dot
+                ui.html(f'<div style="width:8px;height:8px;border-radius:50%;background:{color};flex-shrink:0"></div>')
             with ui.column().classes("gap-0 min-w-0 flex-grow overflow-hidden"):
-                name = spec.get("name", agent.get("id", "?"))
+                name = profile.get("name") or spec.get("name", agent.get("id", "?"))
                 ui.label(name).classes("text-sm font-medium text-slate-800 truncate")
-                idle_reason = agent.get("idle_reason")
-                sidebar_label = f"{state} · {_format_tokens(tokens)} tok"
-                if state == "idle" and idle_reason:
-                    sidebar_label = f"{idle_reason} · {_format_tokens(tokens)} tok"
-                ui.label(sidebar_label).classes("text-xs text-slate-400 truncate")
+                with ui.row().classes("items-center gap-1"):
+                    if is_employee:
+                        ui.html(
+                            '<span style="font-size:9px;padding:1px 4px;border-radius:3px;'
+                            'background:#e0f2fe;color:#0369a1;font-weight:600">employee</span>'
+                        )
+                    idle_reason = agent.get("idle_reason")
+                    sidebar_label = f"{state} · {_format_tokens(tokens)} tok"
+                    if state == "idle" and idle_reason:
+                        sidebar_label = f"{idle_reason} · {_format_tokens(tokens)} tok"
+                    elif state == "idle" and is_employee:
+                        sidebar_label = "available"
+                    ui.label(sidebar_label).classes("text-xs text-slate-400 truncate")
 
     # Render children in sidebar too
     for child in agent.get("children", []):
         _render_sidebar_item(child, selected_path, depth + 1)
 
 
-def _render_detail_panel(agent_path: str, registry):
+def _render_detail_panel(agent_path: str, registry, agent_data: dict | None = None):
     """Render the full detail panel for a selected agent."""
     node = registry.resolve(agent_path)
-    if node is None:
+    is_employee = agent_data.get("_is_employee", False) if agent_data else False
+    profile = agent_data.get("_profile", {}) if agent_data else {}
+
+    if node is None and not is_employee:
         ui.label(f"Agent not found: {agent_path}").classes("text-red-500")
         return
 
-    agent = node.to_dict()
+    agent = node.to_dict() if node else agent_data or {}
     state = agent.get("state", "unknown")
     spec = agent.get("spec", {})
     health = agent.get("health", {})
@@ -243,17 +306,40 @@ def _render_detail_panel(agent_path: str, registry):
 
     # ── Header ──
     with ui.row().classes("w-full items-start justify-between mb-4"):
-        with ui.column().classes("gap-1"):
-            ui.label(spec.get("name", agent.get("id", "?"))).classes("text-2xl font-bold")
-            with ui.row().classes("items-center gap-2"):
-                ui.label(agent.get("path", "")).classes("text-sm text-slate-400 font-mono")
-                ui.badge(state.upper()).style(f"background-color: {color}; color: white")
-                if state == "idle" and agent.get("idle_reason"):
-                    ui.label(f"({agent['idle_reason']})").classes("text-xs text-slate-500")
-                if agent.get("uptime"):
-                    ui.label(f"Up: {agent['uptime']}").classes("text-xs text-slate-400")
-                if agent.get("restart_count", 0) > 0:
-                    ui.label(f"Restarts: {agent['restart_count']}").classes("text-xs text-orange-500")
+        with ui.row().classes("items-start gap-4"):
+            # Employee avatar
+            if is_employee:
+                avatar_url = profile.get("avatar_url")
+                if avatar_url:
+                    ui.image(avatar_url).style(
+                        "width: 56px; height: 56px; border-radius: 50%; "
+                        "object-fit: cover; flex-shrink: 0"
+                    )
+                else:
+                    emoji = profile.get("avatar_emoji", "🤖")
+                    ui.label(emoji).style(
+                        "font-size: 28px; width: 56px; height: 56px; "
+                        "display: flex; align-items: center; justify-content: center; flex-shrink: 0"
+                    )
+
+            with ui.column().classes("gap-1"):
+                name = profile.get("name") or spec.get("name", agent.get("id", "?"))
+                ui.label(name).classes("text-2xl font-bold")
+                with ui.row().classes("items-center gap-2"):
+                    ui.label(agent.get("path", "")).classes("text-sm text-slate-400 font-mono")
+                    ui.badge(state.upper()).style(f"background-color: {color}; color: white")
+                    if is_employee:
+                        ui.badge("EMPLOYEE").style(
+                            "background-color: #e0f2fe; color: #0369a1; font-size: 10px"
+                        )
+                    if state == "idle" and agent.get("idle_reason"):
+                        ui.label(f"({agent['idle_reason']})").classes("text-xs text-slate-500")
+                    if agent.get("uptime"):
+                        ui.label(f"Up: {agent['uptime']}").classes("text-xs text-slate-400")
+                    if agent.get("restart_count", 0) > 0:
+                        ui.label(f"Restarts: {agent['restart_count']}").classes("text-xs text-orange-500")
+                if is_employee and profile.get("title"):
+                    ui.label(profile["title"]).classes("text-sm text-slate-500")
 
         # Action buttons
         with ui.row().classes("gap-2 flex-shrink-0"):
@@ -293,6 +379,22 @@ def _render_detail_panel(agent_path: str, registry):
 
                 ui.button("Resume", icon="play_arrow", on_click=do_resume, color="green") \
                     .props("flat dense no-caps")
+
+    # ── Employee profile card ──
+    if is_employee:
+        with ui.card().classes("w-full p-4 mb-4 bg-sky-50 border border-sky-100"):
+            with ui.row().classes("w-full items-center justify-between mb-2"):
+                ui.label("Employee Profile").classes("text-sm font-semibold text-sky-800")
+                with ui.link(target=f"/team?employee={agent.get('id', '')}").classes("no-underline"):
+                    ui.button("View in Team", icon="badge", color="primary") \
+                        .props("flat dense no-caps size=sm")
+            if profile.get("personality"):
+                ui.label(profile["personality"]).classes("text-sm text-slate-600 mb-2")
+            strengths = profile.get("strengths", [])
+            if strengths:
+                with ui.row().classes("gap-1 flex-wrap"):
+                    for s in strengths:
+                        ui.badge(s).props("outline").classes("text-sky-700").style("font-size: 10px")
 
     # ── Description & Goal ──
     if spec.get("description"):
@@ -342,7 +444,9 @@ def _render_detail_panel(agent_path: str, registry):
 
     # ── Workspace Files ──
     from auton.workspace import list_workspace_files
-    files = list_workspace_files(node.id)
+    uid = node.user_id if node else None
+    aid = node.id if node else agent.get("id", "")
+    files = list_workspace_files(aid, uid)
     with ui.card().classes("w-full p-4 mb-4"):
         ui.label(f"Workspace Files ({len(files)})").classes("text-sm font-semibold text-slate-700 mb-2")
         if not files:
