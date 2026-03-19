@@ -190,7 +190,8 @@ class EmployeeProfile(BaseModel):
     personality: str                   # brief personality description
     strengths: list[str] = Field(default_factory=list)
     avatar_emoji: str = "🤖"
-    status: str = "active"             # active | suspended | archived
+    avatar_url: str | None = None      # URL to generated face image
+    status: str = "active"             # active | waiting_for_input | suspended | archived
     tool_bundles: list[str] = Field(default_factory=list)  # bundle keys
     spec: AgentSpec                    # underlying agent specification
     hired_at: str = ""                 # ISO timestamp

@@ -3,10 +3,13 @@
 import asyncio
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
+import httpx
 from fastapi import Request
 from starlette.responses import Response, RedirectResponse
 from nicegui import ui
@@ -49,6 +52,18 @@ TOOL_BUNDLES = {
         "description": "Spawn and manage sub-agents",
         "tools": ["spawn_child", "message_agent", "list_children", "check_child_status"],
     },
+    "email": {
+        "label": "Email",
+        "icon": "email",
+        "description": "Send and read emails, manage inbox",
+        "tools": ["send_email", "read_email", "list_emails"],
+    },
+    "slack": {
+        "label": "Slack",
+        "icon": "chat",
+        "description": "Send and read Slack messages",
+        "tools": ["send_slack_message", "read_slack_messages", "list_slack_channels"],
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -65,7 +80,7 @@ ROLE_TEMPLATES = [
             "find decision-makers and their contact information, qualify leads based on ICP criteria, "
             "and produce structured prospect lists with enrichment data."
         ),
-        "suggested_bundles": ["web_research", "files"],
+        "suggested_bundles": ["web_research", "files", "email", "slack"],
     },
     {
         "emoji": "💰",
@@ -76,7 +91,7 @@ ROLE_TEMPLATES = [
             "research their portfolio and investment thesis, prepare personalized outreach drafts, "
             "and maintain a structured pipeline of fundraising conversations."
         ),
-        "suggested_bundles": ["web_research", "files"],
+        "suggested_bundles": ["web_research", "files", "email", "slack"],
     },
     {
         "emoji": "💻",
@@ -87,7 +102,7 @@ ROLE_TEMPLATES = [
             "debug issues, implement new features, write tests, and follow best practices. "
             "They should be comfortable with multiple languages and frameworks."
         ),
-        "suggested_bundles": ["code", "files"],
+        "suggested_bundles": ["code", "files", "email", "slack"],
     },
     {
         "emoji": "📊",
@@ -98,7 +113,7 @@ ROLE_TEMPLATES = [
             "analyze pricing strategies, track industry trends and news, "
             "and produce weekly competitive intelligence reports."
         ),
-        "suggested_bundles": ["web_research", "files"],
+        "suggested_bundles": ["web_research", "files", "email", "slack"],
     },
     {
         "emoji": "📝",
@@ -109,7 +124,7 @@ ROLE_TEMPLATES = [
             "email newsletters, and marketing copy. They should adapt tone to different audiences "
             "and maintain brand consistency across channels."
         ),
-        "suggested_bundles": ["web_research", "files"],
+        "suggested_bundles": ["web_research", "files", "email", "slack"],
     },
     {
         "emoji": "🛡️",
@@ -120,31 +135,94 @@ ROLE_TEMPLATES = [
             "monitor security advisories, review dependencies for known CVEs, "
             "and produce security assessment reports with remediation recommendations."
         ),
-        "suggested_bundles": ["code", "web_research", "files"],
+        "suggested_bundles": ["code", "web_research", "files", "email", "slack"],
     },
 ]
 
 STATUS_COLORS = {
     "active": "#22c55e",
+    "waiting_for_input": "#3b82f6",
     "suspended": "#f97316",
     "archived": "#9ca3af",
 }
+
+STATUS_LABELS = {
+    "active": "Active",
+    "waiting_for_input": "Waiting for Input",
+    "suspended": "Suspended",
+    "archived": "Archived",
+}
+
+# ---------------------------------------------------------------------------
+# Face generation via Recraft API
+# ---------------------------------------------------------------------------
+
+FACES_DIR = Path(__file__).parent.parent / "static" / "faces"
+RECRAFT_API_KEY = os.environ.get("RECRAFT_API_KEY", "")
+
+
+async def _generate_face(name: str, title: str, candidate_id: str) -> str | None:
+    """Generate a professional illustrated portrait using Recraft API."""
+    if not RECRAFT_API_KEY:
+        logger.warning("RECRAFT_API_KEY not set, skipping face generation")
+        return None
+
+    prompt = (
+        f"Professional illustrated portrait of a person named {name}, "
+        f"who works as a {title}. Clean solid color background, "
+        f"friendly confident expression, modern business casual style, "
+        f"digital illustration, high quality, suitable for a professional profile picture."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://external.api.recraft.ai/v1/images/generations",
+                headers={"Authorization": f"Bearer {RECRAFT_API_KEY}"},
+                json={
+                    "prompt": prompt,
+                    "model": "recraftv4",
+                    "n": 1,
+                    "size": "1024x1024",
+                    "response_format": "url",
+                },
+            )
+            if resp.status_code != 200:
+                logger.error(f"Recraft face gen failed ({resp.status_code}): {resp.text[:200]}")
+                return None
+
+            data = resp.json()
+            image_url = data["data"][0]["url"]
+
+            # Download and save locally
+            img_resp = await client.get(image_url)
+            if img_resp.status_code != 200:
+                return None
+
+            FACES_DIR.mkdir(parents=True, exist_ok=True)
+            face_path = FACES_DIR / f"{candidate_id}.png"
+            face_path.write_bytes(img_resp.content)
+            return f"/static/dashboard/faces/{candidate_id}.png"
+    except Exception as e:
+        logger.error(f"Face generation failed for {name}: {e}")
+        return None
 
 # ---------------------------------------------------------------------------
 # Candidate generation prompt
 # ---------------------------------------------------------------------------
 
 CANDIDATE_PROMPT = """\
-You are a creative HR assistant for an AI agent platform. The user has written a position description for a persistent AI employee. Generate exactly 3 candidate profiles that could fill this role. Each candidate should have a distinct personality and approach.
+You are a creative HR assistant for an AI agent platform. The user has written a position description for a persistent AI employee. Generate exactly 3 candidate profiles that could fill this role. Each candidate should have a distinct personality, background, and approach.
 
 Position description:
 {vacancy}
 
 Respond with ONLY a JSON array of 3 objects, each with these fields:
-- "name": a realistic full name (diverse backgrounds)
+- "name": a realistic full name (diverse backgrounds, varied gender and ethnicity)
 - "title": a concise job title (3-5 words)
 - "personality": 1-2 sentences describing their work style and personality
 - "strengths": array of 3-4 short strength keywords
+- "appearance": a brief description of their appearance for portrait generation (e.g. "young woman with dark curly hair, warm brown eyes, wearing a navy blazer")
 - "avatar_emoji": a single emoji that represents their role
 - "system_prompt": a detailed system prompt for the AI agent (2-3 paragraphs, written in second person: "You are...")
 - "suggested_bundles": array of tool bundle keys from: {bundles}
@@ -157,7 +235,7 @@ def _bundles_description() -> str:
 
 
 async def _generate_candidates(vacancy: str) -> list[dict]:
-    """Call LLM to generate 3 candidate profiles from a vacancy description."""
+    """Call LLM to generate 3 candidate profiles, then generate face images."""
     prompt = CANDIDATE_PROMPT.format(
         vacancy=vacancy,
         bundles=_bundles_description(),
@@ -177,8 +255,25 @@ async def _generate_candidates(vacancy: str) -> list[dict]:
                 raw = raw[:-3]
             raw = raw.strip()
         candidates = json.loads(raw)
-        if isinstance(candidates, list) and len(candidates) >= 1:
-            return candidates[:3]
+        if not isinstance(candidates, list) or len(candidates) < 1:
+            return []
+        candidates = candidates[:3]
+
+        # Generate face images concurrently for all candidates
+        async def gen_face_for(cand, idx):
+            cand_id = f"cand-{uuid.uuid4().hex[:8]}"
+            cand["_candidate_id"] = cand_id
+            appearance = cand.get("appearance", "")
+            face_prompt_desc = appearance or cand.get("title", "professional")
+            avatar_url = await _generate_face(
+                cand.get("name", f"Candidate {idx+1}"),
+                face_prompt_desc,
+                cand_id,
+            )
+            cand["avatar_url"] = avatar_url
+
+        await asyncio.gather(*(gen_face_for(c, i) for i, c in enumerate(candidates)))
+        return candidates
     except Exception as e:
         logger.error(f"Candidate generation failed: {e}")
     return []
@@ -273,24 +368,41 @@ def render_team_dashboard(request: Request) -> Optional[Response]:
 # Employee card (grid view)
 # ---------------------------------------------------------------------------
 
+def _render_avatar(emp_or_cand: dict, size: str = "48px"):
+    """Render avatar: face image if available, emoji fallback."""
+    avatar_url = emp_or_cand.get("avatar_url")
+    if avatar_url:
+        ui.image(avatar_url).style(
+            f"width: {size}; height: {size}; border-radius: 50%; object-fit: cover; flex-shrink: 0"
+        )
+    else:
+        emoji = emp_or_cand.get("avatar_emoji", "🤖")
+        font_size = f"{int(size.replace('px', '')) // 2}px" if "px" in size else "24px"
+        ui.label(emoji).style(
+            f"font-size: {font_size}; width: {size}; height: {size}; "
+            f"display: flex; align-items: center; justify-content: center; flex-shrink: 0"
+        )
+
+
 def _render_employee_card(emp: dict):
     """Render an employee as a clickable card."""
     eid = emp.get("id", "")
     status = emp.get("status", "active")
     color = STATUS_COLORS.get(status, "#94a3b8")
+    status_label = STATUS_LABELS.get(status, status.capitalize())
 
     with ui.card().classes(
         "p-4 cursor-pointer hover:shadow-lg transition-all border border-slate-100"
     ).style("width: 280px").on("click", lambda e=eid: ui.navigate.to(f"/team?employee={e}")):
         with ui.row().classes("items-center gap-3 mb-3"):
-            ui.label(emp.get("avatar_emoji", "🤖")).classes("text-3xl")
+            _render_avatar(emp, "56px")
             with ui.column().classes("gap-0 min-w-0"):
                 ui.label(emp.get("name", "Unknown")).classes("text-sm font-bold text-slate-800 truncate")
                 ui.label(emp.get("title", "")).classes("text-xs text-slate-500 truncate")
 
         with ui.row().classes("items-center gap-2 mb-3"):
             ui.html(f'<div style="width:8px;height:8px;border-radius:50%;background:{color}"></div>')
-            ui.label(status.capitalize()).classes("text-xs text-slate-500")
+            ui.label(status_label).classes("text-xs text-slate-500")
 
         strengths = emp.get("strengths", [])
         if strengths:
@@ -327,12 +439,13 @@ def _render_employee_detail(employee_id: str, employees: list[dict], vacancy_dia
     # Header
     with ui.row().classes("w-full items-start justify-between mb-6"):
         with ui.row().classes("items-center gap-4"):
-            ui.label(emp.get("avatar_emoji", "🤖")).classes("text-5xl")
+            _render_avatar(emp, "80px")
             with ui.column().classes("gap-1"):
                 ui.label(emp.get("name", "?")).classes("text-2xl font-bold")
                 ui.label(emp.get("title", "")).classes("text-sm text-slate-500")
                 with ui.row().classes("items-center gap-2 mt-1"):
-                    ui.badge(status.upper()).style(f"background-color: {color}; color: white")
+                    status_label = STATUS_LABELS.get(status, status.capitalize())
+                    ui.badge(status_label.upper()).style(f"background-color: {color}; color: white")
                     if emp.get("hired_at"):
                         try:
                             hired = datetime.fromisoformat(emp["hired_at"])
@@ -569,8 +682,10 @@ def _build_vacancy_dialog():
                             ui.notify("Please select a candidate first", type="warning")
                             return
                         cand = selected_candidate["value"]
+                        # Merge LLM-suggested bundles with any pre-selected from role template
                         suggested = cand.get("suggested_bundles", [])
-                        selected_bundles["value"] = set(b for b in suggested if b in TOOL_BUNDLES)
+                        merged = selected_bundles["value"] | set(b for b in suggested if b in TOOL_BUNDLES)
+                        selected_bundles["value"] = merged
                         _populate_onboarding(onboard_container, cand, selected_bundles)
                         step1.set_visibility(False)
                         step2.set_visibility(False)
@@ -621,14 +736,25 @@ def _build_vacancy_dialog():
                             max_tokens=100_000,
                         )
 
+                        # Copy face image from candidate ID to employee ID
+                        emp_id = f"emp-{uuid.uuid4().hex[:8]}"
+                        avatar_url = cand.get("avatar_url")
+                        if avatar_url and cand.get("_candidate_id"):
+                            src = FACES_DIR / f"{cand['_candidate_id']}.png"
+                            if src.exists():
+                                dst = FACES_DIR / f"{emp_id}.png"
+                                dst.write_bytes(src.read_bytes())
+                                avatar_url = f"/static/dashboard/faces/{emp_id}.png"
+
                         profile = {
-                            "id": f"emp-{uuid.uuid4().hex[:8]}",
+                            "id": emp_id,
                             "name": cand["name"],
                             "title": cand.get("title", ""),
                             "personality": cand.get("personality", ""),
                             "strengths": cand.get("strengths", []),
                             "avatar_emoji": cand.get("avatar_emoji", "🤖"),
-                            "status": "active",
+                            "avatar_url": avatar_url,
+                            "status": "waiting_for_input",
                             "tool_bundles": bundles,
                             "spec": spec.model_dump(),
                             "hired_at": now,
@@ -678,7 +804,7 @@ def _populate_candidates(container, candidates: list[dict], selected_ref: dict):
 
             with card:
                 with ui.row().classes("items-center gap-4 mb-3"):
-                    ui.label(cand.get("avatar_emoji", "🤖")).classes("text-4xl")
+                    _render_avatar(cand, "64px")
                     with ui.column().classes("gap-0"):
                         ui.label(cand.get("name", "Candidate")).classes("text-lg font-bold")
                         ui.label(cand.get("title", "")).classes("text-sm text-slate-500")
@@ -699,7 +825,7 @@ def _populate_onboarding(container, candidate: dict, bundles_ref: dict):
     with container:
         # Candidate summary
         with ui.row().classes("items-center gap-4 mb-4 p-4 bg-teal-50 rounded-lg"):
-            ui.label(candidate.get("avatar_emoji", "🤖")).classes("text-4xl")
+            _render_avatar(candidate, "64px")
             with ui.column().classes("gap-0"):
                 ui.label(candidate.get("name", "")).classes("text-lg font-bold")
                 ui.label(candidate.get("title", "")).classes("text-sm text-slate-500")
