@@ -530,10 +530,11 @@ class LLMClient:
 
     async def _call_api(self, no_tools: bool = False) -> dict:
         """Make the litellm API call."""
-        # Anthropic does not support assistant message prefill —
-        # the conversation must end with a user (or tool) message.
-        # If the last message is from assistant, inject a continuation prompt.
-        if self.messages and self.messages[-1].get("role") == "assistant":
+        # Prefill fix: inject [Continue] to prevent "assistant message prefill" error
+        # with Anthropic models. Set PREFILL_FIX_ENABLED=false to disable (saves tokens).
+        import os
+        prefill_fix = os.getenv("PREFILL_FIX_ENABLED", "true").lower() != "false"
+        if prefill_fix and self.messages and self.messages[-1].get("role") == "assistant":
             self.messages.append({
                 "role": "user",
                 "content": "[Continue]",
