@@ -530,6 +530,14 @@ class LLMClient:
 
     async def _call_api(self, no_tools: bool = False) -> dict:
         """Make the litellm API call."""
+        # Prefill fix: inject [Continue] to prevent "assistant message prefill" error
+        # with Anthropic models. Always on — this is a correctness fix.
+        if self.messages and self.messages[-1].get("role") == "assistant":
+            self.messages.append({
+                "role": "user",
+                "content": "[Continue]",
+            })
+
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "system", "content": self.system_prompt}] + self.messages,
