@@ -59,8 +59,7 @@ Examples of NOT completion (is_completion: false):
 - "Yeah, that was a stale notification." → {"is_completion": false, "has_evidence": false}
 - "Want me to adjust the gate sensitivity?" → {"is_completion": false, "has_evidence": false}"""
 
-# Load verification protocol once
-_PROTOCOL_PATH = Path.home() / "lethe" / "skills" / "verification_mandatory.md"
+# Load verification protocol from file next to this module
 _protocol_cache: str | None = None
 
 
@@ -68,8 +67,9 @@ def _load_protocol() -> str:
     global _protocol_cache
     if _protocol_cache is None:
         try:
-            _protocol_cache = _PROTOCOL_PATH.read_text()
-        except FileNotFoundError:
+            _proto_path = Path(__file__).parent / "verification_protocol.md"
+            _protocol_cache = _proto_path.read_text()
+        except Exception:
             _protocol_cache = (
                 "VERIFICATION REQUIRED: Before reporting task completion, you must "
                 "verify the actual result — run the command, check the endpoint, "
